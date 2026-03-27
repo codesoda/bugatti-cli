@@ -35,6 +35,10 @@
 - Transcript artifacts: per-step `step_NNNN.txt` + combined `full_transcript.txt` under transcripts/
 - BUGATTI_LOG events: parsed via `parse_log_events()` in executor; stored in `StepOutcome.log_events` and written to `logs/bugatti_log_events.txt`
 - Console log rendering format: `LOG ........ <message>`
+- Report compilation lives in `src/report.rs`; `compile_report()` generates markdown, `write_report()` writes to disk
+- `ReportInput` struct collects all data needed for report generation (run IDs, config summary, outcome, artifact paths)
+- BUGATTI_LOG events are included in report only for WARN/ERROR steps, not OK steps
+- Report is always written regardless of pass/fail status
 
 ---
 
@@ -216,4 +220,22 @@
   - Step begin shows 1-based step number (N/M), instruction summary (truncated), and source file
   - Run summary uses box-drawing chars (═) for visual separation
   - All console output from executor is synchronous println!() — no async or buffering needed
+---
+
+## 2026-03-27 - US-015
+- Implemented report.md compilation in a separate `src/report.rs` module
+- `compile_report()` generates markdown from `ReportInput` struct (run model, not console output)
+- Report includes: run ID, session ID, test file, provider, start/end time, duration, pass/fail status
+- Report includes: skipped commands section (only when commands were skipped)
+- Report includes: ordered step results with OK/WARN/ERROR, per-step transcript paths
+- Report includes: BUGATTI_LOG events for WARN/ERROR steps only
+- Report includes: effective config summary and artifact directory paths
+- `write_report()` writes to `.bugatti/runs/<run-id>/report.md`
+- Both successful and failed runs produce report.md
+- Files changed: src/report.rs (new), src/lib.rs, prd.json
+- **Learnings for future iterations:**
+  - `std::fmt::Write` is needed for `writeln!()` on `String` — import as `FmtWrite` to avoid conflict
+  - `let _ = writeln!(...)` pattern suppresses infallible write errors for best-effort content
+  - Report uses markdown tables for structured data (metadata, config, artifacts)
+  - `format_duration()` helper switches between seconds and minutes at 60s threshold
 ---
