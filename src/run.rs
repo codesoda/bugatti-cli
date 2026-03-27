@@ -12,9 +12,21 @@ pub struct RunId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionId(pub String);
 
+impl Default for RunId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RunId {
     pub fn new() -> Self {
         Self(Uuid::new_v4().to_string())
+    }
+}
+
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
