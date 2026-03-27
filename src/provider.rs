@@ -82,7 +82,7 @@ pub trait AgentSession {
 }
 
 /// Errors from provider operations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ProviderError {
     /// Provider failed to initialize (e.g., binary not found, invalid config).
     InitializationFailed(String),

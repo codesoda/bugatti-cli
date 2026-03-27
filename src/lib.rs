@@ -2,6 +2,7 @@ pub mod claude_code;
 pub mod cli;
 pub mod command;
 pub mod config;
+pub mod executor;
 pub mod expand;
 pub mod provider;
 pub mod run;

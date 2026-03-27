@@ -24,6 +24,15 @@
 - Provider trait lives in `src/provider.rs`; `AgentSession` trait defines the provider-agnostic interface
 - Provider messages carry `RunId`, `SessionId`, and `step_id` for traceability
 - Streaming uses `Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>>>` (synchronous iterator pattern)
+- Claude Code adapter lives in `src/claude_code.rs`; `ClaudeCodeAdapter` implements `AgentSession`
+- Claude CLI invoked via `claude -p <msg> --session-id <id> --output-format stream-json` for each message
+- `which` crate resolves the `claude` binary path at initialization time
+- Stream-json output is JSONL; events have `type` field: "assistant", "result", "error"
+- Mock subprocess tests use `sh -c 'echo ...'` to simulate CLI JSON output
+- Step execution lives in `src/executor.rs`; `execute_steps()` runs expanded steps sequentially in one session
+- `parse_result_marker()` scans output lines in reverse for RESULT OK/WARN/ERROR contract markers
+- Executor stops on first hard failure (ERROR/timeout/protocol error); WARN is a pass and continues
+- Transcript artifacts: per-step `step_NNNN.txt` + combined `full_transcript.txt` under transcripts/
 
 ---
 
@@ -141,4 +150,38 @@
   - Synchronous iterator pattern avoids async runtime dependency while supporting streaming
   - `ProviderError` enum covers full lifecycle: init, start, send, stream, shutdown, crash
   - `OutputChunk::Done` marker signals end of provider response for a message
+---
+
+## 2026-03-27 - US-011
+- Implemented `ClaudeCodeAdapter` in `src/claude_code.rs` implementing the `AgentSession` trait
+- Launches `claude` CLI subprocess per message with `--session-id` for conversation continuity
+- Uses `--output-format stream-json` for JSONL streaming; parses assistant/result/error event types
+- Extra system prompt passed via `--system-prompt` flag; agent_args appended to command
+- `ClaudeCodeStreamIterator` reads stdout line-by-line, parses JSON events, yields `OutputChunk` values
+- Handles process failure (non-zero exit) as `SessionCrashed`, error events as `StreamError`
+- Binary resolution via `which` crate at initialization time
+- Files changed: src/claude_code.rs (new), src/lib.rs, Cargo.toml, Cargo.lock
+- **Learnings for future iterations:**
+  - `which::which()` is cleaner than manual PATH search for binary resolution
+  - `Box<dyn Iterator + '_>` lifetime ties iterator to the struct borrow, preventing use-after-free
+  - Mock subprocess tests with `sh -c 'echo JSON'` effectively test stream parsing without the real CLI
+  - `Command::get_args()` enables testing command construction without spawning processes
+  - `read_to_string` on child stderr needs `std::io::Read` import (separate from `BufRead`)
+---
+
+## 2026-03-27 - US-012
+- Implemented step execution loop in `src/executor.rs` with sequential step execution within one provider session
+- Each step message includes run ID, session ID, step ID, source provenance, and instruction text
+- Streamed provider output captured in transcript artifacts (per-step and combined full_transcript.txt)
+- RESULT contract parsing: scans for last RESULT OK / RESULT WARN: ... / RESULT ERROR: ... line
+- Missing result marker produces protocol error; step timeout enforced via Instant-based checks
+- Stops execution on first failure (ERROR, protocol error, timeout, provider failure); WARN continues
+- Added Clone derive to ProviderError for mock test support
+- Files changed: src/executor.rs (new), src/lib.rs, src/provider.rs
+- **Learnings for future iterations:**
+  - `ProviderError` needs `Clone` derive for mock session tests (cloned into iterator responses)
+  - Executor module pattern: `execute_steps()` takes `&mut dyn AgentSession` for provider-agnostic execution
+  - Result parsing scans lines in reverse — last RESULT marker wins
+  - Transcript artifacts: per-step `step_NNNN.txt` + combined `full_transcript.txt`
+  - MockSession pattern with pre-loaded response vectors is effective for testing execution flow
 ---
