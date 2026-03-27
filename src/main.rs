@@ -6,12 +6,10 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Test { path } => {
-            match path {
-                Some(p) => println!("Running test file: {p}"),
-                None => println!("Discovering and running all root test files..."),
-            }
-        }
+        Commands::Test { path } => match path {
+            Some(p) => println!("Running test file: {p}"),
+            None => println!("Discovering and running all root test files..."),
+        },
     }
 }
 

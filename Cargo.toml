@@ -8,3 +8,6 @@ description = "A CLI for plain-English, agent-assisted local application verific
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
