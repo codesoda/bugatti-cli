@@ -9,9 +9,16 @@
 - Step validation: exactly one of instruction/include_path/include_glob must be set per step
 - Use `effective_config()` from config module to merge test overrides before execution
 - `ProviderConfig::merge_overrides()` handles field-level Option merging (Some replaces, None preserves)
+- Short-lived command execution lives in `src/command.rs`; use `run_short_lived_commands()` during setup phase
+- Commands are run via `sh -c` for shell expansion; stdout/stderr captured to `logs/<name>.stdout.log` / `logs/<name>.stderr.log`
 - Run identity and artifacts live in `src/run.rs`; use `initialize_run()` to set up a run
 - `ArtifactDir::from_run_id()` computes deterministic artifact paths from project root + run ID
 - Run metadata is written as JSON to `.bugatti/runs/<run-id>/run_metadata.json`
+- Long-lived commands: use `spawn_long_lived_commands()` to start background processes; returns `Vec<TrackedProcess>`
+- Use `check_for_unexpected_exits()` to detect crashed long-lived processes during run
+- Use `teardown_processes()` to SIGTERM all tracked processes at run end
+- Readiness checks use `curl -sf` subprocess; polls every 500ms with 30s timeout
+- `libc` crate is used for SIGTERM on unix; `child.kill()` fallback on non-unix
 
 ---
 
@@ -74,4 +81,35 @@
   - `uuid::Uuid::new_v4()` for unique run/session identifiers
   - `std::fs::create_dir_all` is idempotent and handles nested directory creation
   - `serde_json::to_string_pretty` for human-readable metadata files
+---
+
+## 2026-03-27 - US-007
+- Implemented short-lived command execution with output capture and fail-fast behavior
+- Commands run via `sh -c` for shell expansion support
+- stdout/stderr captured to `logs/<name>.stdout.log` and `logs/<name>.stderr.log`
+- Non-zero exit stops execution immediately with clear error including stderr path
+- `skip_cmds` parameter allows skipping specific commands (for future --skip-cmd CLI flag)
+- Console output shows RUN/OK/SKIP status for each command
+- Files changed: src/command.rs (new), src/lib.rs
+- **Learnings for future iterations:**
+  - `std::process::Command::new("sh").arg("-c").arg(&cmd)` is the pattern for running shell commands with expansion
+  - `output.status.code()` returns `Option<i32>` (None if killed by signal)
+  - BTreeMap iteration order guarantees deterministic command execution order
+  - Tests use `tempfile::tempdir()` + `ArtifactDir::from_run_id()` + `create_all()` to set up artifact directories
+---
+
+## 2026-03-27 - US-008
+- Implemented long-lived subprocess management with readiness checks
+- Spawns background processes via `sh -c` with stdout/stderr redirected to log files
+- Readiness polling via `curl -sf` subprocess, 500ms interval, 30s timeout
+- Unexpected exit detection via `try_wait()` on tracked process handles
+- Teardown sends SIGTERM (unix) with 5s grace period, then force-kills
+- Added `libc` dependency for SIGTERM signal on unix
+- Files changed: src/command.rs, Cargo.toml, Cargo.lock
+- **Learnings for future iterations:**
+  - `Stdio::from(std::fs::File)` redirects child process output to a file
+  - `child.try_wait()` is non-blocking process status check
+  - `libc::kill(pid, libc::SIGTERM)` for graceful shutdown on unix
+  - clippy requires `&mut [T]` instead of `&mut Vec<T>` for function params
+  - Readiness checks should tear down already-started processes on failure
 ---

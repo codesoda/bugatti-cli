@@ -1,7 +1,8 @@
 use crate::config::{CommandDef, CommandKind, Config};
 use crate::run::ArtifactDir;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Result of executing a short-lived command.
 #[derive(Debug)]
@@ -32,6 +33,12 @@ pub enum CommandError {
         path: String,
         source: std::io::Error,
     },
+    /// Readiness check failed for a long-lived command.
+    ReadinessFailed {
+        name: String,
+        url: String,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for CommandError {
@@ -55,6 +62,12 @@ impl std::fmt::Display for CommandError {
             }
             CommandError::OutputWriteFailed { path, source } => {
                 write!(f, "failed to write command output to '{path}': {source}")
+            }
+            CommandError::ReadinessFailed { name, url, message } => {
+                write!(
+                    f,
+                    "readiness check for '{name}' at '{url}' failed: {message}"
+                )
             }
         }
     }
@@ -144,6 +157,249 @@ fn execute_short_lived(
     })
 }
 
+/// Default timeout for readiness checks (30 seconds).
+const DEFAULT_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default interval between readiness poll attempts (500ms).
+const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A tracked long-lived background process.
+#[derive(Debug)]
+pub struct TrackedProcess {
+    pub name: String,
+    pub child: Child,
+    pub stdout_path: String,
+    pub stderr_path: String,
+}
+
+impl TrackedProcess {
+    /// Check if the process has exited unexpectedly.
+    /// Returns Some(exit_code) if exited, None if still running.
+    pub fn check_exited(&mut self) -> Option<Option<i32>> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(status.code()),
+            Ok(None) => None,
+            Err(_) => Some(None),
+        }
+    }
+}
+
+/// Result of tearing down long-lived processes.
+#[derive(Debug)]
+pub struct TeardownResult {
+    pub name: String,
+    pub success: bool,
+    pub message: String,
+}
+
+/// Spawn all long-lived commands as background processes, capturing output to log files.
+///
+/// After spawning, if a readiness_url is configured, polls it until ready or timeout.
+/// Returns a list of tracked processes that must be torn down later.
+pub fn spawn_long_lived_commands(
+    config: &Config,
+    artifact_dir: &ArtifactDir,
+    skip_cmds: &[String],
+) -> Result<Vec<TrackedProcess>, CommandError> {
+    let mut tracked = Vec::new();
+
+    for (name, def) in &config.commands {
+        if def.kind != CommandKind::LongLived {
+            continue;
+        }
+        if skip_cmds.contains(name) {
+            println!("SKIP ....... {name} (long-lived)");
+            continue;
+        }
+
+        println!("START ...... {name}: {}", def.cmd);
+
+        let stdout_path = artifact_dir.logs.join(format!("{name}.stdout.log"));
+        let stderr_path = artifact_dir.logs.join(format!("{name}.stderr.log"));
+
+        let stdout_file =
+            std::fs::File::create(&stdout_path).map_err(|e| CommandError::OutputWriteFailed {
+                path: stdout_path.display().to_string(),
+                source: e,
+            })?;
+        let stderr_file =
+            std::fs::File::create(&stderr_path).map_err(|e| CommandError::OutputWriteFailed {
+                path: stderr_path.display().to_string(),
+                source: e,
+            })?;
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg(&def.cmd)
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .spawn()
+            .map_err(|e| CommandError::SpawnFailed {
+                name: name.to_string(),
+                cmd: def.cmd.clone(),
+                source: e,
+            })?;
+
+        let process = TrackedProcess {
+            name: name.clone(),
+            child,
+            stdout_path: stdout_path.display().to_string(),
+            stderr_path: stderr_path.display().to_string(),
+        };
+
+        tracked.push(process);
+
+        // Check readiness if configured
+        if let Some(ref readiness_url) = def.readiness_url {
+            println!("WAIT ....... {name}: polling {readiness_url}");
+            if let Err(e) = poll_readiness(readiness_url, DEFAULT_READINESS_TIMEOUT) {
+                // Readiness failed - tear down what we've started
+                println!("FAIL ....... {name}: readiness check failed");
+                teardown_processes(&mut tracked);
+                return Err(CommandError::ReadinessFailed {
+                    name: name.to_string(),
+                    url: readiness_url.clone(),
+                    message: e,
+                });
+            }
+            println!("READY ...... {name}");
+        }
+    }
+
+    Ok(tracked)
+}
+
+/// Poll a readiness URL until it responds with a success status or timeout.
+fn poll_readiness(url: &str, timeout: Duration) -> Result<(), String> {
+    let start = Instant::now();
+
+    while start.elapsed() < timeout {
+        // Try a simple TCP connection check by parsing the URL and connecting
+        if check_url(url) {
+            return Ok(());
+        }
+        std::thread::sleep(READINESS_POLL_INTERVAL);
+    }
+
+    Err(format!(
+        "timed out after {}s waiting for {url}",
+        timeout.as_secs()
+    ))
+}
+
+/// Check if a URL is reachable by attempting a simple HTTP GET via a spawned curl process.
+fn check_url(url: &str) -> bool {
+    Command::new("curl")
+        .args(["-sf", "--max-time", "2", "-o", "/dev/null", url])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Check if any tracked processes have exited unexpectedly.
+/// Returns the name and exit code of the first process found to have exited.
+pub fn check_for_unexpected_exits(
+    processes: &mut [TrackedProcess],
+) -> Option<(String, Option<i32>)> {
+    for process in processes.iter_mut() {
+        if let Some(exit_code) = process.check_exited() {
+            return Some((process.name.clone(), exit_code));
+        }
+    }
+    None
+}
+
+/// Tear down all tracked long-lived processes by sending SIGTERM.
+/// Returns results describing the outcome for each process.
+pub fn teardown_processes(processes: &mut [TrackedProcess]) -> Vec<TeardownResult> {
+    let mut results = Vec::new();
+
+    for process in processes.iter_mut() {
+        let result = teardown_single(process);
+        results.push(result);
+    }
+
+    results
+}
+
+/// Tear down a single process with SIGTERM, waiting briefly for exit.
+fn teardown_single(process: &mut TrackedProcess) -> TeardownResult {
+    let name = process.name.clone();
+
+    // Check if already exited
+    match process.child.try_wait() {
+        Ok(Some(status)) => {
+            return TeardownResult {
+                name,
+                success: true,
+                message: format!(
+                    "already exited with code {}",
+                    status.code().unwrap_or(-1)
+                ),
+            };
+        }
+        Ok(None) => {} // Still running, proceed with SIGTERM
+        Err(e) => {
+            return TeardownResult {
+                name,
+                success: false,
+                message: format!("failed to check process status: {e}"),
+            };
+        }
+    }
+
+    // Send SIGTERM
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = process.child.kill();
+    }
+
+    // Wait briefly for orderly shutdown
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match process.child.try_wait() {
+            Ok(Some(status)) => {
+                return TeardownResult {
+                    name,
+                    success: true,
+                    message: format!(
+                        "terminated with code {}",
+                        status.code().unwrap_or(-1)
+                    ),
+                };
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Force kill after timeout
+                    let _ = process.child.kill();
+                    let _ = process.child.wait();
+                    return TeardownResult {
+                        name,
+                        success: false,
+                        message: "did not exit after SIGTERM; force killed".to_string(),
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return TeardownResult {
+                    name,
+                    success: false,
+                    message: format!("error waiting for process: {e}"),
+                };
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,14 +408,25 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn make_config(commands: Vec<(&str, CommandKind, &str)>) -> Config {
+        make_config_with_readiness(
+            commands
+                .into_iter()
+                .map(|(n, k, c)| (n, k, c, None))
+                .collect(),
+        )
+    }
+
+    fn make_config_with_readiness(
+        commands: Vec<(&str, CommandKind, &str, Option<&str>)>,
+    ) -> Config {
         let mut map = BTreeMap::new();
-        for (name, kind, cmd) in commands {
+        for (name, kind, cmd, readiness_url) in commands {
             map.insert(
                 name.to_string(),
                 CommandDef {
                     kind,
                     cmd: cmd.to_string(),
-                    readiness_url: None,
+                    readiness_url: readiness_url.map(String::from),
                 },
             );
         }
@@ -295,5 +562,122 @@ mod tests {
         // Verify second command's log files don't exist (it never ran)
         let second_stdout = artifact_dir.logs.join("b_second.stdout.log");
         assert!(!second_stdout.exists());
+    }
+
+    // --- Long-lived command tests ---
+
+    #[test]
+    fn spawn_long_lived_captures_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = RunId("test-run".to_string());
+        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
+        artifact_dir.create_all().unwrap();
+
+        // Use a command that writes output then sleeps briefly
+        let config = make_config(vec![(
+            "worker",
+            CommandKind::LongLived,
+            "echo long_lived_output && sleep 60",
+        )]);
+
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].name, "worker");
+
+        // Give it a moment to write output
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Verify log files exist
+        assert!(std::path::Path::new(&tracked[0].stdout_path).exists());
+        assert!(std::path::Path::new(&tracked[0].stderr_path).exists());
+
+        // Verify output was captured
+        let stdout = std::fs::read_to_string(&tracked[0].stdout_path).unwrap();
+        assert!(
+            stdout.contains("long_lived_output"),
+            "stdout: {stdout}"
+        );
+
+        // Clean up
+        teardown_processes(&mut tracked);
+    }
+
+    #[test]
+    fn spawn_long_lived_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = RunId("test-run".to_string());
+        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
+        artifact_dir.create_all().unwrap();
+
+        let config = make_config(vec![
+            ("server", CommandKind::LongLived, "sleep 60"),
+            ("worker", CommandKind::LongLived, "sleep 60"),
+        ]);
+
+        let mut tracked =
+            spawn_long_lived_commands(&config, &artifact_dir, &["server".to_string()]).unwrap();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].name, "worker");
+
+        teardown_processes(&mut tracked);
+    }
+
+    #[test]
+    fn teardown_stops_running_processes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = RunId("test-run".to_string());
+        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
+        artifact_dir.create_all().unwrap();
+
+        let config = make_config(vec![("sleeper", CommandKind::LongLived, "sleep 600")]);
+
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        assert_eq!(tracked.len(), 1);
+
+        let results = teardown_processes(&mut tracked);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success, "teardown should succeed: {}", results[0].message);
+    }
+
+    #[test]
+    fn detect_unexpected_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = RunId("test-run".to_string());
+        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
+        artifact_dir.create_all().unwrap();
+
+        // Command that exits immediately
+        let config = make_config(vec![("quick_exit", CommandKind::LongLived, "exit 1")]);
+
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[]).unwrap();
+
+        // Wait for it to exit
+        std::thread::sleep(Duration::from_millis(200));
+
+        let result = check_for_unexpected_exits(&mut tracked);
+        assert!(result.is_some(), "should detect unexpected exit");
+        let (name, exit_code) = result.unwrap();
+        assert_eq!(name, "quick_exit");
+        assert_eq!(exit_code, Some(1));
+    }
+
+    #[test]
+    fn short_lived_not_spawned_as_long_lived() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = RunId("test-run".to_string());
+        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
+        artifact_dir.create_all().unwrap();
+
+        let config = make_config(vec![
+            ("setup", CommandKind::ShortLived, "echo setup"),
+            ("server", CommandKind::LongLived, "sleep 60"),
+        ]);
+
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        // Only long-lived should be spawned
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].name, "server");
+
+        teardown_processes(&mut tracked);
     }
 }
