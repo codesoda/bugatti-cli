@@ -60,12 +60,12 @@ pub fn expand_steps(
     root_path: &Path,
     test_file: &TestFile,
 ) -> Result<Vec<ExpandedStep>, ExpandError> {
-    let canonical_root = root_path
-        .canonicalize()
-        .map_err(|e| ExpandError::TestFileError(TestFileError::ReadError {
+    let canonical_root = root_path.canonicalize().map_err(|e| {
+        ExpandError::TestFileError(TestFileError::ReadError {
             path: root_path.display().to_string(),
             source: e,
-        }))?;
+        })
+    })?;
 
     let mut visited = HashSet::new();
     visited.insert(canonical_root.clone());
@@ -146,12 +146,12 @@ fn expand_included_file(
     steps: &mut Vec<ExpandedStep>,
     step_id: &mut usize,
 ) -> Result<(), ExpandError> {
-    let canonical = resolved_path
-        .canonicalize()
-        .map_err(|e| ExpandError::TestFileError(TestFileError::ReadError {
+    let canonical = resolved_path.canonicalize().map_err(|e| {
+        ExpandError::TestFileError(TestFileError::ReadError {
             path: resolved_path.display().to_string(),
             source: e,
-        }))?;
+        })
+    })?;
 
     if !visited.insert(canonical.clone()) {
         // Cycle detected — build the chain for the error message
@@ -253,7 +253,10 @@ instruction = "Verify state"
         assert_eq!(expanded.len(), 2);
         assert_eq!(expanded[0].step_id, 0);
         assert_eq!(expanded[0].instruction, "Run migrations");
-        assert_eq!(expanded[0].source_file, included_path.canonicalize().unwrap());
+        assert_eq!(
+            expanded[0].source_file,
+            included_path.canonicalize().unwrap()
+        );
         assert_eq!(expanded[0].parent_chain.len(), 1);
         assert_eq!(expanded[1].step_id, 1);
         assert_eq!(expanded[1].instruction, "Verify state");

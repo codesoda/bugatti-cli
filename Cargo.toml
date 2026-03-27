@@ -5,9 +5,13 @@ edition = "2021"
 description = "A CLI for plain-English, agent-assisted local application verification using *.test.toml files"
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+glob = "0.3.3"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

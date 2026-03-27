@@ -1,0 +1,383 @@
+{
+  "project": "bugatti-cli",
+  "branchName": "ralph/bugatti-cli-v1",
+  "description": "Bugatti - A Rust CLI for plain-English, agent-assisted local application verification using *.test.toml files",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Scaffold Rust CLI with clap and basic bugatti test subcommand",
+      "description": "As a developer, I need the initial Rust project structure with a clap-based CLI that accepts `bugatti test [path]` so that subsequent stories have a working binary to build on.",
+      "acceptanceCriteria": [
+        "Cargo.toml is configured with project name 'bugatti' and necessary dependencies (clap, serde, toml)",
+        "Running `cargo run -- test` prints a placeholder message and exits 0",
+        "Running `cargo run -- test some/path.test.toml` accepts the path argument",
+        "Project has a clean module layout: main.rs, cli.rs, lib.rs",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Define config types and parse bugatti.config.toml",
+      "description": "As a test author, I need Bugatti to load and validate a project-level bugatti.config.toml with provider settings and command definitions.",
+      "acceptanceCriteria": [
+        "Config struct defined with provider section (name, extra_system_prompt, agent_args) and commands map",
+        "Command definition supports kind (short_lived/long_lived), cmd string, and optional readiness_url",
+        "bugatti.config.toml is loaded from the current working directory if present",
+        "Missing config file is not an error - defaults are used",
+        "Invalid TOML or unknown fields produce a clear error and exit before execution",
+        "Unit tests cover: valid config parsing, missing file defaults, invalid config error",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Define test file types and parse *.test.toml into in-memory model",
+      "description": "As a test author, I need Bugatti to parse a root *.test.toml file into a normalized model with name, optional overrides, and a list of steps.",
+      "acceptanceCriteria": [
+        "Test file struct supports: name, optional overrides.provider section, and steps array",
+        "A step is either an instruction step (with instruction text) or an include step (with include_glob or include_path)",
+        "Steps support an optional 'include_only = true' flag at the file level to mark files as non-root",
+        "Parsing a valid test file returns the in-memory model",
+        "Parsing an invalid test file produces a clear error with the file path",
+        "Unit tests cover: instruction steps, include steps, overrides, parse errors",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Merge per-test overrides into effective config",
+      "description": "As a test author, I need per-test overrides from the test file to be merged over global config so I can customize provider settings per test.",
+      "acceptanceCriteria": [
+        "Test file overrides.provider fields merge over global config provider fields",
+        "Unset override fields preserve the global config values",
+        "The merged effective config is computed before any execution begins",
+        "Unit tests verify merge precedence and partial overrides",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Expand include steps into a flat execution plan with cycle detection",
+      "description": "As a test author, I need Bugatti to recursively expand include steps (by path or glob) into one flat ordered step list, detecting cycles before execution.",
+      "acceptanceCriteria": [
+        "Include steps referencing a file path are expanded inline",
+        "Include steps with glob patterns expand to matching files in deterministic sorted order",
+        "Nested includes are supported (included files can include other files)",
+        "Direct cycles (A includes A) are detected and produce a clear error showing the chain",
+        "Indirect cycles (A includes B includes A) are detected and produce a clear error",
+        "Each expanded step retains source provenance: original file path, local step name/index, parent chain",
+        "Each expanded step gets a stable sequential step ID",
+        "Unit tests cover: single include, glob, nested, direct cycle, indirect cycle, provenance",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Create run identity, session ID, and artifact directory layout",
+      "description": "As an operator, I need each run to get a unique run ID and have its artifact directory created at .bugatti/runs/<run-id>/ before execution begins.",
+      "acceptanceCriteria": [
+        "A unique run ID is generated before any execution (UUID or similar)",
+        "A fresh session ID is generated per root test-file run",
+        "The artifact directory .bugatti/runs/<run-id>/ is created with subdirectories: transcripts/, screenshots/, logs/, diagnostics/",
+        "A run metadata JSON file is written with: root test file path, project root, run ID, session ID, provider name, start time, effective config summary",
+        "If artifact directory creation fails, Bugatti exits with a clear error before launching anything",
+        "Artifact paths are deterministic from the run ID alone",
+        "Unit tests cover: directory creation, metadata file contents",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Implement harness command execution for short-lived commands",
+      "description": "As a test author, I need Bugatti to run short-lived setup commands from config, capture their output, and fail fast if they fail.",
+      "acceptanceCriteria": [
+        "Short-lived commands from config are executed during the setup phase",
+        "stdout and stderr are captured and stored as artifacts under the run's logs/ directory",
+        "If a required short-lived command exits non-zero, the run fails before step execution with a clear error",
+        "Command execution status is printed to the console during setup",
+        "Unit tests cover: successful command, failed command, output capture",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Implement long-lived subprocess management with readiness checks",
+      "description": "As a test author, I need Bugatti to start long-lived processes, wait for readiness, track them during the run, and tear them down at the end.",
+      "acceptanceCriteria": [
+        "Long-lived commands are spawned as background processes during setup",
+        "stdout/stderr of long-lived processes are captured to log files in the run's logs/ directory",
+        "If a readiness_url is configured, Bugatti polls it until ready or timeout",
+        "If readiness check fails, the run fails before step execution",
+        "If a long-lived process exits unexpectedly during the run, the run is marked as failed",
+        "On run completion/failure/cancellation, all tracked long-lived processes are sent SIGTERM for orderly shutdown",
+        "Incomplete teardown is reported in the final output",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Add CLI skip flags for harness commands",
+      "description": "As a developer, I need to skip specific harness commands via --skip-cmd flags so I can iterate without restarting services I already have running.",
+      "acceptanceCriteria": [
+        "bugatti test accepts one or more --skip-cmd <name> flags",
+        "Skipped command names are validated against known command names in effective config before execution",
+        "Invalid skip names produce a clear error before execution",
+        "Skipped commands are not launched, tracked, or torn down",
+        "Skipped commands are recorded in console output and the final report",
+        "Readiness checks for skipped commands still run unless explicitly disabled",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Define the provider session trait",
+      "description": "As a harness developer, I need a provider-agnostic async trait representing one long-lived agent session so the harness is decoupled from any specific provider.",
+      "acceptanceCriteria": [
+        "A Rust trait (AgentSession or similar) is defined with methods: initialize from config, start conversation, send bootstrap message, send step message, receive streamed output, close session",
+        "The trait receives the resolved effective config object, not raw TOML",
+        "Session initialization supports provider-specific options from config",
+        "Step messages include run ID, session ID, and step ID",
+        "The trait is defined in a provider module separate from harness logic",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Implement Claude Code provider adapter",
+      "description": "As a harness developer, I need a Claude Code adapter implementing the provider trait so Bugatti can run steps through Claude Code CLI.",
+      "acceptanceCriteria": [
+        "ClaudeCodeAdapter implements the provider session trait",
+        "It launches Claude Code CLI as a subprocess with configured agent_args",
+        "It maintains one ongoing conversation for the full test run (no nested sessions)",
+        "It supports sending bootstrap and step messages into the session",
+        "It streams assistant output back to the harness for live display and transcript capture",
+        "Extra system prompt and harness prompt additions from config are passed to the provider",
+        "If provider startup fails, the run fails with a clear error before step execution",
+        "If the provider session crashes mid-run, the run is marked as failed",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Implement step execution loop with result contract parsing",
+      "description": "As a test author, I need Bugatti to execute expanded steps sequentially in one session, parse the RESULT marker, and record outcomes.",
+      "acceptanceCriteria": [
+        "All expanded steps execute sequentially within one provider session",
+        "Each step message includes run ID, session ID, step ID, source provenance, and instruction text",
+        "Streamed provider output is captured in transcript artifacts",
+        "The harness looks for RESULT followed by OK, WARN: ..., or ERROR: ... as the final result marker",
+        "Free-form text before the result marker is allowed and captured",
+        "If output ends without a valid result marker, the step is marked as failed with a protocol error",
+        "Step timeout is enforced - if exceeded, step is marked as failed",
+        "After each step, the outcome is recorded and execution advances or stops based on failure behavior",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Recognize and record reserved BUGATTI_LOG lines from provider output",
+      "description": "As an operator, I need reserved BUGATTI_LOG lines in streamed output to be parsed into step-scoped run events.",
+      "acceptanceCriteria": [
+        "Lines matching 'BUGATTI_LOG <message>' in provider output are recognized as log events",
+        "Log events are associated with the active run ID and step ID",
+        "Log events are stored separately from raw transcript and harness tracing",
+        "Log events are rendered in the console as 'LOG ........ <message>'",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Stream live run progress to the console",
+      "description": "As an operator, I need to see real-time progress in the terminal including setup status, step boundaries, and results.",
+      "acceptanceCriteria": [
+        "Setup phase prints command start/success/failure/skip status",
+        "Each step clearly shows when it begins (with step ID and instruction summary)",
+        "Each step clearly shows when its result is recorded (with OK/WARN/ERROR)",
+        "BUGATTI_LOG events render inline as 'LOG ........ <message>'",
+        "Final run status is printed after all steps complete",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Compile and write the default report.md",
+      "description": "As an operator, I need a human-readable report.md written to .bugatti/runs/<run-id>/report.md for every run.",
+      "acceptanceCriteria": [
+        "report.md is generated from the internal run model, not scraped from console output",
+        "Report includes: run ID, root test file path, provider name, start/end time, duration",
+        "Report includes: effective command skip list, ordered step results with OK/WARN/ERROR text",
+        "Report includes: relevant step-scoped BUGATTI_LOG entries for WARN/ERROR steps",
+        "Report includes: artifact paths for deeper investigation",
+        "Report includes: effective config summary showing global vs override sources",
+        "The report compiler is in a separate reporting module",
+        "Both successful and failed runs produce report.md",
+        "If report compilation partially fails, best-effort content is still written with a note about the failure",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Set up structured tracing and persist harness diagnostics",
+      "description": "As an operator, I need Bugatti to use structured tracing internally and persist diagnostics as a run artifact separate from report.md.",
+      "acceptanceCriteria": [
+        "Bugatti uses the tracing crate for internal harness events: config load, command execution, readiness, provider startup, step lifecycle, timeouts, teardown, report compilation",
+        "Tracing output is written to a file under the run's diagnostics/ directory",
+        "Harness tracing events are distinct from BUGATTI_LOG events in storage",
+        "The internal run model distinguishes harness diagnostics, agent logs, transcript, evidence, and report",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Capture full provider transcript as a run artifact",
+      "description": "As an operator, I need the complete streamed provider transcript saved as an artifact even when the report only shows excerpts.",
+      "acceptanceCriteria": [
+        "The full provider transcript for the run is written to a file under transcripts/",
+        "Transcript capture happens during streaming, not reconstructed after the fact",
+        "The transcript file is referenced in report.md",
+        "Artifact capture failures are recorded in both tracing output and the report rather than silently dropped",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Support evidence references in the run artifact model",
+      "description": "As an operator, I need the run model to support references to evidence (screenshots, command logs, browser output) so the report can point to them.",
+      "acceptanceCriteria": [
+        "The run artifact model supports typed evidence references: screenshots, command logs, browser console, network failures, SQL/CLI evidence",
+        "Evidence references point to durable paths under the run directory, not inline payloads",
+        "WARN/ERROR steps in the report include relevant evidence references",
+        "Missing or failed evidence collection is noted in the report rather than silently omitted",
+        "The run can complete even if optional evidence sources are unavailable",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Implement root test discovery for no-arg bugatti test",
+      "description": "As a developer, I need bugatti test with no path to discover and run all root *.test.toml files under the project root.",
+      "acceptanceCriteria": [
+        "bugatti test with no path discovers *.test.toml files under the project root",
+        "Files marked include_only = true are excluded from discovery",
+        "Discovery order is deterministic (sorted by path)",
+        "Each discovered root test gets its own run ID, session, and artifact directory",
+        "Include-only files can still be referenced by include steps in root tests",
+        "Multi-test invocation prints an aggregate summary with each root test and its outcome",
+        "If one root test fails, Bugatti continues with remaining tests by default",
+        "Parse/cycle errors are reported per-file before provider startup for that test",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Implement stable exit codes and run finalization",
+      "description": "As a developer, I need stable exit codes and predictable finalization so I can use Bugatti in scripts and CI.",
+      "acceptanceCriteria": [
+        "All-OK run exits 0",
+        "Any ERROR step exits non-zero",
+        "Warning-only runs exit 0 by default",
+        "Config, parse, cycle, provider-startup, readiness, timeout errors exit non-zero",
+        "Multi-test mode computes overall exit from aggregate outcomes",
+        "Finalization order: record status, flush artifacts, stop subprocesses, print summary, exit",
+        "Interrupted runs (Ctrl+C) attempt best-effort cleanup and report writing",
+        "Final console output includes run ID and report path for each run",
+        "Exit codes are documented in CLI help text",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "Wire end-to-end: bugatti test <path> runs a full single-file test",
+      "description": "As a developer, I need the full pipeline wired together so bugatti test <path> loads config, parses the test, sets up commands, creates artifacts, runs steps through the provider, and writes the report.",
+      "acceptanceCriteria": [
+        "bugatti test <path> executes the complete pipeline: config load -> parse -> expand -> artifact setup -> command setup -> provider init -> step execution -> report -> teardown -> exit",
+        "All previously implemented components are integrated in the correct order",
+        "Error at any phase fails cleanly with appropriate exit code and best-effort artifact flush",
+        "Integration test demonstrates a mock provider completing a simple test file",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

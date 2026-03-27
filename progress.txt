@@ -1,0 +1,77 @@
+## Codebase Patterns
+- CLI is built with clap derive macros; subcommands go in `src/cli.rs`
+- Module layout: `main.rs` (entry), `cli.rs` (clap definitions), `lib.rs` (module re-exports)
+- Tests for CLI parsing use `Cli::parse_from` with synthetic args
+- Config structs use `#[serde(deny_unknown_fields)]` for strict validation
+- Use `tempfile::tempdir()` for filesystem-dependent tests
+- BTreeMap for deterministic key ordering in config maps
+- Test file types live in `src/test_file.rs`; steps use flat struct with Option fields validated post-parse
+- Step validation: exactly one of instruction/include_path/include_glob must be set per step
+- Use `effective_config()` from config module to merge test overrides before execution
+- `ProviderConfig::merge_overrides()` handles field-level Option merging (Some replaces, None preserves)
+- Run identity and artifacts live in `src/run.rs`; use `initialize_run()` to set up a run
+- `ArtifactDir::from_run_id()` computes deterministic artifact paths from project root + run ID
+- Run metadata is written as JSON to `.bugatti/runs/<run-id>/run_metadata.json`
+
+---
+
+## 2026-03-27 - US-001
+- Scaffolded Rust CLI project with clap, serde, toml dependencies
+- Created `bugatti test [path]` subcommand with optional path argument
+- Files changed: Cargo.toml, Cargo.lock, src/main.rs, src/cli.rs, src/lib.rs
+- **Learnings for future iterations:**
+  - clap derive with `#[command(subcommand)]` is the pattern for subcommands
+  - Optional positional args use `Option<String>` in clap derive structs
+  - Tests live in `src/main.rs` `#[cfg(test)]` module for now; may need a `tests/` dir later
+---
+
+## 2026-03-27 - US-002
+- Defined Config, ProviderConfig, CommandDef, CommandKind types with serde deserialization
+- Implemented `load_config()` that reads bugatti.config.toml from a directory, returns defaults if missing
+- Used `#[serde(deny_unknown_fields)]` to reject unknown fields with clear errors
+- Used BTreeMap for commands to ensure deterministic ordering
+- Added tempfile as dev-dependency for test isolation
+- Files changed: src/config.rs (new), src/lib.rs, Cargo.toml, Cargo.lock
+- **Learnings for future iterations:**
+  - `#[serde(deny_unknown_fields)]` catches typos and invalid config fields at parse time
+  - `#[serde(rename_all = "snake_case")]` works well for enum variants (e.g., `short_lived` in TOML)
+  - `tempfile::tempdir()` is the pattern for filesystem-dependent tests
+  - clippy prefers `#[derive(Default)]` over manual `impl Default` when all fields have defaults
+---
+
+## 2026-03-27 - US-003
+- Defined TestFile, TestOverrides, ProviderOverrides, Step types with serde deserialization
+- Implemented `parse_test_file()` that reads and validates *.test.toml files
+- Steps use flat struct with Option fields; post-parse validation ensures exactly one variant is set
+- TestFileError includes file path in all error messages for clear diagnostics
+- Files changed: src/test_file.rs (new), src/lib.rs
+- **Learnings for future iterations:**
+  - Flat struct with Option fields + post-parse validation is simpler than serde untagged enums for step variants
+  - `deny_unknown_fields` on all structs catches schema drift early
+  - Error types should always carry the file path for user-facing messages
+---
+
+## 2026-03-27 - US-004
+- Added `ProviderConfig::merge_overrides()` method for field-level override merging
+- Added `effective_config()` function that computes merged config from global + test file overrides
+- Override fields that are `Some` replace global values; `None` preserves global values
+- Commands map is always preserved from global config (not overridable per-test)
+- Files changed: src/config.rs
+- **Learnings for future iterations:**
+  - Cross-module imports work naturally: config.rs imports from test_file.rs via `crate::test_file`
+  - The `effective_config` should be computed before any execution begins (per acceptance criteria)
+  - Test structs can be constructed directly in unit tests without going through TOML parsing
+---
+
+## 2026-03-27 - US-006
+- Created `src/run.rs` with RunId, SessionId (UUID v4), ArtifactDir, RunMetadata types
+- `initialize_run()` generates IDs, creates `.bugatti/runs/<run-id>/` with transcripts/, screenshots/, logs/, diagnostics/ subdirs
+- Writes run_metadata.json with run ID, session ID, test file path, project root, provider name, start time, effective config summary
+- Added chrono, serde_json, uuid dependencies
+- Files changed: src/run.rs (new), src/lib.rs, Cargo.toml, Cargo.lock
+- **Learnings for future iterations:**
+  - `chrono::DateTime<Utc>` with `serde` feature serializes to ISO 8601 by default
+  - `uuid::Uuid::new_v4()` for unique run/session identifiers
+  - `std::fs::create_dir_all` is idempotent and handles nested directory creation
+  - `serde_json::to_string_pretty` for human-readable metadata files
+---
