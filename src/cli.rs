@@ -14,5 +14,11 @@ pub enum Commands {
     Test {
         /// Path to a specific .test.toml file to run
         path: Option<String>,
+
+        /// Skip launching a harness command by name (can be repeated).
+        /// The command will not be started, tracked, or torn down.
+        /// Readiness checks for skipped commands still run by default.
+        #[arg(long = "skip-cmd")]
+        skip_cmds: Vec<String>,
     },
 }

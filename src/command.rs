@@ -75,6 +75,34 @@ impl std::fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
+/// Validate that all skip-cmd names refer to known command names in the config.
+/// Returns an error message listing invalid names if any are unknown.
+pub fn validate_skip_cmds(config: &Config, skip_cmds: &[String]) -> Result<(), String> {
+    let unknown: Vec<&String> = skip_cmds
+        .iter()
+        .filter(|name| !config.commands.contains_key(name.as_str()))
+        .collect();
+
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        let known: Vec<&String> = config.commands.keys().collect();
+        Err(format!(
+            "unknown command(s) in --skip-cmd: {}. Known commands: {}",
+            unknown
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            known
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ))
+    }
+}
+
 /// Execute all short-lived commands from the config during the setup phase.
 ///
 /// Commands are executed in BTreeMap order (alphabetical by name).
@@ -209,6 +237,20 @@ pub fn spawn_long_lived_commands(
         }
         if skip_cmds.contains(name) {
             println!("SKIP ....... {name} (long-lived)");
+            // Readiness checks still run for skipped commands (user may have it running externally)
+            if let Some(ref readiness_url) = def.readiness_url {
+                println!("WAIT ....... {name} (skipped): polling {readiness_url}");
+                if let Err(e) = poll_readiness(readiness_url, DEFAULT_READINESS_TIMEOUT) {
+                    println!("FAIL ....... {name} (skipped): readiness check failed");
+                    teardown_processes(&mut tracked);
+                    return Err(CommandError::ReadinessFailed {
+                        name: name.to_string(),
+                        url: readiness_url.clone(),
+                        message: e,
+                    });
+                }
+                println!("READY ...... {name} (skipped)");
+            }
             continue;
         }
 
@@ -334,10 +376,7 @@ fn teardown_single(process: &mut TrackedProcess) -> TeardownResult {
             return TeardownResult {
                 name,
                 success: true,
-                message: format!(
-                    "already exited with code {}",
-                    status.code().unwrap_or(-1)
-                ),
+                message: format!("already exited with code {}", status.code().unwrap_or(-1)),
             };
         }
         Ok(None) => {} // Still running, proceed with SIGTERM
@@ -370,10 +409,7 @@ fn teardown_single(process: &mut TrackedProcess) -> TeardownResult {
                 return TeardownResult {
                     name,
                     success: true,
-                    message: format!(
-                        "terminated with code {}",
-                        status.code().unwrap_or(-1)
-                    ),
+                    message: format!("terminated with code {}", status.code().unwrap_or(-1)),
                 };
             }
             Ok(None) => {
@@ -593,10 +629,7 @@ mod tests {
 
         // Verify output was captured
         let stdout = std::fs::read_to_string(&tracked[0].stdout_path).unwrap();
-        assert!(
-            stdout.contains("long_lived_output"),
-            "stdout: {stdout}"
-        );
+        assert!(stdout.contains("long_lived_output"), "stdout: {stdout}");
 
         // Clean up
         teardown_processes(&mut tracked);
@@ -636,7 +669,11 @@ mod tests {
 
         let results = teardown_processes(&mut tracked);
         assert_eq!(results.len(), 1);
-        assert!(results[0].success, "teardown should succeed: {}", results[0].message);
+        assert!(
+            results[0].success,
+            "teardown should succeed: {}",
+            results[0].message
+        );
     }
 
     #[test]
@@ -659,6 +696,49 @@ mod tests {
         let (name, exit_code) = result.unwrap();
         assert_eq!(name, "quick_exit");
         assert_eq!(exit_code, Some(1));
+    }
+
+    #[test]
+    fn validate_skip_cmds_valid_names() {
+        let config = make_config(vec![
+            ("migrate", CommandKind::ShortLived, "echo migrate"),
+            ("server", CommandKind::LongLived, "sleep 60"),
+        ]);
+
+        assert!(validate_skip_cmds(&config, &["migrate".to_string()]).is_ok());
+        assert!(validate_skip_cmds(&config, &["server".to_string()]).is_ok());
+        assert!(
+            validate_skip_cmds(&config, &["migrate".to_string(), "server".to_string()]).is_ok()
+        );
+        assert!(validate_skip_cmds(&config, &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_skip_cmds_invalid_names() {
+        let config = make_config(vec![("migrate", CommandKind::ShortLived, "echo migrate")]);
+
+        let err = validate_skip_cmds(&config, &["nonexistent".to_string()]).unwrap_err();
+        assert!(err.contains("nonexistent"), "error: {err}");
+        assert!(
+            err.contains("migrate"),
+            "error should list known commands: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_skip_cmds_mixed_valid_invalid() {
+        let config = make_config(vec![
+            ("migrate", CommandKind::ShortLived, "echo migrate"),
+            ("server", CommandKind::LongLived, "sleep 60"),
+        ]);
+
+        let err =
+            validate_skip_cmds(&config, &["migrate".to_string(), "bogus".to_string()]).unwrap_err();
+        assert!(err.contains("bogus"), "error: {err}");
+        assert!(
+            !err.contains("migrate") || err.contains("Known commands"),
+            "should not list migrate as unknown"
+        );
     }
 
     #[test]
