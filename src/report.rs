@@ -37,6 +37,8 @@ pub struct ReportInput<'a> {
     pub config_summary: &'a EffectiveConfigSummary,
     pub outcome: &'a RunOutcome,
     pub artifact_dir: &'a ArtifactDir,
+    /// Artifact capture errors (e.g., failed transcript writes) to include in the report.
+    pub artifact_errors: &'a [String],
 }
 
 /// Compile report.md content from the run model.
@@ -115,6 +117,12 @@ pub fn compile_report(input: &ReportInput) -> String {
         "| Run Directory | `{}` |",
         input.artifact_dir.root.display()
     );
+    let full_transcript_path = input.artifact_dir.transcripts.join("full_transcript.txt");
+    let _ = writeln!(
+        report,
+        "| Full Transcript | `{}` |",
+        full_transcript_path.display()
+    );
     let _ = writeln!(
         report,
         "| Transcripts | `{}` |",
@@ -133,6 +141,21 @@ pub fn compile_report(input: &ReportInput) -> String {
     );
     let _ = writeln!(report);
 
+    // Artifact capture errors
+    if !input.artifact_errors.is_empty() {
+        let _ = writeln!(report, "## Artifact Capture Errors");
+        let _ = writeln!(report);
+        let _ = writeln!(
+            report,
+            "_The following errors occurred while capturing run artifacts:_"
+        );
+        let _ = writeln!(report);
+        for err in input.artifact_errors {
+            let _ = writeln!(report, "- {err}");
+        }
+        let _ = writeln!(report);
+    }
+
     report
 }
 
@@ -141,12 +164,17 @@ pub fn compile_report(input: &ReportInput) -> String {
 /// Both successful and failed runs produce report.md.
 /// If compilation partially fails, best-effort content is still written.
 pub fn write_report(input: &ReportInput, artifact_dir: &ArtifactDir) -> Result<(), ReportError> {
+    tracing::info!("compiling report");
     let content = compile_report(input);
     let report_path = report_path(artifact_dir);
 
-    std::fs::write(&report_path, content).map_err(|e| ReportError::WriteError {
-        path: report_path.display().to_string(),
-        source: e,
+    tracing::info!(path = %report_path.display(), bytes = content.len(), "writing report");
+    std::fs::write(&report_path, &content).map_err(|e| {
+        tracing::error!(path = %report_path.display(), error = %e, "report write failed");
+        ReportError::WriteError {
+            path: report_path.display().to_string(),
+            source: e,
+        }
     })
 }
 
@@ -344,6 +372,7 @@ mod tests {
             config_summary: summary,
             outcome,
             artifact_dir,
+            artifact_errors: &[],
         }
     }
 
@@ -360,6 +389,7 @@ mod tests {
             ],
             all_passed: true,
             total_duration: Duration::from_millis(3000),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -390,6 +420,7 @@ mod tests {
             ],
             all_passed: false,
             total_duration: Duration::from_millis(6500),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -414,6 +445,7 @@ mod tests {
             steps: vec![make_warn_step(0, "response took 2.5s")],
             all_passed: true,
             total_duration: Duration::from_millis(3200),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -443,6 +475,7 @@ mod tests {
             steps: vec![step],
             all_passed: true,
             total_duration: Duration::from_millis(1500),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -461,6 +494,7 @@ mod tests {
             steps: vec![make_ok_step(0, "Check homepage")],
             all_passed: true,
             total_duration: Duration::from_millis(1500),
+            artifact_errors: vec![],
         };
         let skipped = vec!["server".to_string(), "migrate".to_string()];
 
@@ -489,6 +523,7 @@ mod tests {
             steps: vec![make_ok_step(0, "Check homepage")],
             all_passed: true,
             total_duration: Duration::from_millis(1500),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -507,6 +542,7 @@ mod tests {
             steps: vec![],
             all_passed: true,
             total_duration: Duration::from_millis(0),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -530,6 +566,7 @@ mod tests {
             steps: vec![],
             all_passed: true,
             total_duration: Duration::from_millis(0),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -558,6 +595,7 @@ mod tests {
             }],
             all_passed: false,
             total_duration: Duration::from_millis(2000),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -577,6 +615,7 @@ mod tests {
             steps: vec![make_ok_step(0, "Check homepage")],
             all_passed: true,
             total_duration: Duration::from_millis(1500),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -599,6 +638,7 @@ mod tests {
             steps: vec![make_error_step(0, "server crashed")],
             all_passed: false,
             total_duration: Duration::from_millis(5000),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -637,6 +677,7 @@ mod tests {
             ],
             all_passed: true,
             total_duration: Duration::from_millis(3000),
+            artifact_errors: vec![],
         };
 
         let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
@@ -644,5 +685,71 @@ mod tests {
 
         assert!(report.contains("step_0000.txt"));
         assert!(report.contains("step_0001.txt"));
+    }
+
+    #[test]
+    fn compile_report_includes_full_transcript_path() {
+        let run_id = RunId("test-run-001".to_string());
+        let session_id = SessionId("test-session-001".to_string());
+        let (_tmp, artifact_dir) = test_artifact_dir();
+        let summary = test_config_summary();
+        let outcome = RunOutcome {
+            steps: vec![make_ok_step(0, "Check homepage")],
+            all_passed: true,
+            total_duration: Duration::from_millis(1500),
+            artifact_errors: vec![],
+        };
+
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let report = compile_report(&input);
+
+        assert!(report.contains("Full Transcript"));
+        assert!(report.contains("full_transcript.txt"));
+    }
+
+    #[test]
+    fn compile_report_includes_artifact_errors() {
+        let run_id = RunId("test-run-001".to_string());
+        let session_id = SessionId("test-session-001".to_string());
+        let (_tmp, artifact_dir) = test_artifact_dir();
+        let summary = test_config_summary();
+        let outcome = RunOutcome {
+            steps: vec![make_ok_step(0, "Check homepage")],
+            all_passed: true,
+            total_duration: Duration::from_millis(1500),
+            artifact_errors: vec![],
+        };
+        let errors = vec![
+            "failed to write transcript for step 0".to_string(),
+            "failed to append to full transcript".to_string(),
+        ];
+
+        let mut input =
+            make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        input.artifact_errors = &errors;
+        let report = compile_report(&input);
+
+        assert!(report.contains("## Artifact Capture Errors"));
+        assert!(report.contains("failed to write transcript for step 0"));
+        assert!(report.contains("failed to append to full transcript"));
+    }
+
+    #[test]
+    fn compile_report_no_artifact_errors_omits_section() {
+        let run_id = RunId("test-run-001".to_string());
+        let session_id = SessionId("test-session-001".to_string());
+        let (_tmp, artifact_dir) = test_artifact_dir();
+        let summary = test_config_summary();
+        let outcome = RunOutcome {
+            steps: vec![make_ok_step(0, "Check homepage")],
+            all_passed: true,
+            total_duration: Duration::from_millis(1500),
+            artifact_errors: vec![],
+        };
+
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let report = compile_report(&input);
+
+        assert!(!report.contains("## Artifact Capture Errors"));
     }
 }

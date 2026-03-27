@@ -126,6 +126,8 @@ pub struct RunOutcome {
     pub all_passed: bool,
     /// Total duration of step execution.
     pub total_duration: Duration,
+    /// Artifact capture errors encountered during the run (e.g., failed transcript writes).
+    pub artifact_errors: Vec<String>,
 }
 
 /// Error from the executor.
@@ -216,13 +218,36 @@ pub fn execute_steps(
 ) -> Result<RunOutcome, ExecutorError> {
     let timeout = step_timeout.unwrap_or(Duration::from_secs(DEFAULT_STEP_TIMEOUT_SECS));
     let mut outcomes = Vec::with_capacity(steps.len());
+    let mut artifact_errors: Vec<String> = Vec::new();
     let run_start = Instant::now();
 
     let total_steps = steps.len();
 
+    // Open full_transcript.txt for incremental writing during streaming.
+    // This ensures transcript is captured as execution progresses, not reconstructed after the fact.
+    let full_transcript_path = artifact_dir.transcripts.join("full_transcript.txt");
+    let mut full_transcript_file = match std::fs::File::create(&full_transcript_path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            let msg = format!(
+                "failed to create full transcript file '{}': {e}",
+                full_transcript_path.display()
+            );
+            tracing::error!("{msg}");
+            artifact_errors.push(msg);
+            None
+        }
+    };
+
     for step in steps {
         // Print step begin
         let instruction_summary = truncate_instruction(&step.instruction, 60);
+        tracing::info!(
+            step_id = step.step_id,
+            total = total_steps,
+            source = %step.source_file.display(),
+            "step execution begin"
+        );
         println!(
             "STEP {}/{} ... {} (from {})",
             step.step_id + 1,
@@ -257,18 +282,52 @@ pub fn execute_steps(
             println!("LOG ........ {}", event.message);
         }
 
+        // Log step result to tracing
+        tracing::info!(
+            step_id = step.step_id,
+            result = %step_result,
+            duration_ms = duration.as_millis() as u64,
+            log_event_count = log_events.len(),
+            "step execution complete"
+        );
+
         // Print step result
         print_step_result(&step_result, duration);
 
-        // Write transcript artifact for this step
+        // Write per-step transcript artifact
         let transcript_path = artifact_dir
             .transcripts
             .join(format!("step_{:04}.txt", step.step_id));
         if let Err(e) = std::fs::write(&transcript_path, &transcript) {
-            eprintln!(
-                "Warning: failed to write transcript for step {}: {}",
-                step.step_id, e
+            let msg = format!(
+                "failed to write transcript for step {} to '{}': {e}",
+                step.step_id,
+                transcript_path.display()
             );
+            tracing::error!("{msg}");
+            artifact_errors.push(msg);
+        }
+
+        // Append to full transcript incrementally during execution
+        if let Some(ref mut f) = full_transcript_file {
+            let write_result = (|| -> std::io::Result<()> {
+                writeln!(f, "=== Step {} ===", step.step_id)?;
+                writeln!(f, "Instruction: {}", step.instruction)?;
+                writeln!(f, "Result: {}", step_result)?;
+                writeln!(f, "Duration: {:.1}s", duration.as_secs_f64())?;
+                writeln!(f, "---")?;
+                writeln!(f, "{}", transcript)?;
+                writeln!(f)?;
+                Ok(())
+            })();
+            if let Err(e) = write_result {
+                let msg = format!(
+                    "failed to append step {} to full transcript: {e}",
+                    step.step_id
+                );
+                tracing::error!("{msg}");
+                artifact_errors.push(msg);
+            }
         }
 
         let outcome = StepOutcome {
@@ -286,6 +345,10 @@ pub fn execute_steps(
 
         // Stop on failure
         if is_failure {
+            tracing::warn!(
+                step_id = step.step_id,
+                "stopping execution due to step failure"
+            );
             break;
         }
     }
@@ -296,19 +359,8 @@ pub fn execute_steps(
     // Print final run status
     print_run_summary(&outcomes, total_duration, total_steps);
 
-    // Write combined transcript
-    let combined_transcript_path = artifact_dir.transcripts.join("full_transcript.txt");
-    if let Ok(mut f) = std::fs::File::create(&combined_transcript_path) {
-        for outcome in &outcomes {
-            let _ = writeln!(f, "=== Step {} ===", outcome.step_id);
-            let _ = writeln!(f, "Instruction: {}", outcome.instruction);
-            let _ = writeln!(f, "Result: {}", outcome.result);
-            let _ = writeln!(f, "Duration: {:.1}s", outcome.duration.as_secs_f64());
-            let _ = writeln!(f, "---");
-            let _ = writeln!(f, "{}", outcome.transcript);
-            let _ = writeln!(f);
-        }
-    }
+    // Flush/close the full transcript file
+    drop(full_transcript_file);
 
     // Write log events to a separate file (distinct from transcript and diagnostics)
     let log_events_path = artifact_dir.logs.join("bugatti_log_events.txt");
@@ -325,6 +377,7 @@ pub fn execute_steps(
         steps: outcomes,
         all_passed,
         total_duration,
+        artifact_errors,
     })
 }
 
@@ -406,6 +459,7 @@ fn execute_single_step(
     let stream = match session.send_step(message) {
         Ok(s) => s,
         Err(e) => {
+            tracing::error!(error = %e, "provider send_step failed");
             return Err((transcript, StepResult::ProviderFailed(e.to_string())));
         }
     };
@@ -413,6 +467,10 @@ fn execute_single_step(
     for chunk_result in stream {
         // Check timeout
         if start.elapsed() > *timeout {
+            tracing::error!(
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "step timed out during streaming"
+            );
             return Err((transcript, StepResult::Timeout));
         }
 
@@ -431,6 +489,10 @@ fn execute_single_step(
 
     // Check timeout one more time after stream ends
     if start.elapsed() > *timeout {
+        tracing::error!(
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "step timed out after streaming"
+        );
         return Err((transcript, StepResult::Timeout));
     }
 
@@ -841,6 +903,88 @@ mod tests {
         // Combined transcript
         let full_transcript = artifact_dir.transcripts.join("full_transcript.txt");
         assert!(full_transcript.is_file());
+    }
+
+    #[test]
+    fn execute_steps_full_transcript_written_incrementally() {
+        let steps = test_steps();
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![
+            vec![
+                Ok(OutputChunk::Text(
+                    "First step output.\nRESULT OK".to_string(),
+                )),
+                Ok(OutputChunk::Done),
+            ],
+            vec![
+                Ok(OutputChunk::Text(
+                    "Second step output.\nRESULT OK".to_string(),
+                )),
+                Ok(OutputChunk::Done),
+            ],
+        ]);
+
+        let outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+        )
+        .unwrap();
+
+        assert!(outcome.artifact_errors.is_empty());
+
+        // Full transcript should exist and contain both steps
+        let full_transcript_path = artifact_dir.transcripts.join("full_transcript.txt");
+        assert!(full_transcript_path.is_file());
+        let contents = std::fs::read_to_string(&full_transcript_path).unwrap();
+        assert!(contents.contains("=== Step 0 ==="));
+        assert!(contents.contains("First step output."));
+        assert!(contents.contains("=== Step 1 ==="));
+        assert!(contents.contains("Second step output."));
+    }
+
+    #[test]
+    fn execute_steps_full_transcript_captures_partial_on_failure() {
+        let steps = test_steps();
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![
+            vec![
+                Ok(OutputChunk::Text(
+                    "RESULT ERROR: something broke".to_string(),
+                )),
+                Ok(OutputChunk::Done),
+            ],
+            // Second step will not execute
+            vec![
+                Ok(OutputChunk::Text("RESULT OK".to_string())),
+                Ok(OutputChunk::Done),
+            ],
+        ]);
+
+        let outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+        )
+        .unwrap();
+
+        // Full transcript should contain the first (failed) step but not the second
+        let full_transcript_path = artifact_dir.transcripts.join("full_transcript.txt");
+        let contents = std::fs::read_to_string(&full_transcript_path).unwrap();
+        assert!(contents.contains("=== Step 0 ==="));
+        assert!(contents.contains("something broke"));
+        assert!(!contents.contains("=== Step 1 ==="));
+        assert!(outcome.artifact_errors.is_empty());
     }
 
     #[test]
