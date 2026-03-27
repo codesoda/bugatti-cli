@@ -218,7 +218,19 @@ pub fn execute_steps(
     let mut outcomes = Vec::with_capacity(steps.len());
     let run_start = Instant::now();
 
+    let total_steps = steps.len();
+
     for step in steps {
+        // Print step begin
+        let instruction_summary = truncate_instruction(&step.instruction, 60);
+        println!(
+            "STEP {}/{} ... {} (from {})",
+            step.step_id + 1,
+            total_steps,
+            instruction_summary,
+            step.source_file.display()
+        );
+
         let step_start = Instant::now();
 
         let message = StepMessage {
@@ -244,6 +256,9 @@ pub fn execute_steps(
         for event in &log_events {
             println!("LOG ........ {}", event.message);
         }
+
+        // Print step result
+        print_step_result(&step_result, duration);
 
         // Write transcript artifact for this step
         let transcript_path = artifact_dir
@@ -278,6 +293,9 @@ pub fn execute_steps(
     let all_passed = outcomes.iter().all(|o| o.result.is_pass());
     let total_duration = run_start.elapsed();
 
+    // Print final run status
+    print_run_summary(&outcomes, total_duration, total_steps);
+
     // Write combined transcript
     let combined_transcript_path = artifact_dir.transcripts.join("full_transcript.txt");
     if let Ok(mut f) = std::fs::File::create(&combined_transcript_path) {
@@ -308,6 +326,69 @@ pub fn execute_steps(
         all_passed,
         total_duration,
     })
+}
+
+/// Truncate an instruction string to a maximum length, appending "..." if truncated.
+fn truncate_instruction(instruction: &str, max_len: usize) -> String {
+    // Take first line only for the summary
+    let first_line = instruction.lines().next().unwrap_or(instruction);
+    if first_line.len() <= max_len {
+        first_line.to_string()
+    } else {
+        format!("{}...", &first_line[..max_len])
+    }
+}
+
+/// Print the result of a step to the console.
+fn print_step_result(result: &StepResult, duration: Duration) {
+    let duration_str = format!("{:.1}s", duration.as_secs_f64());
+    match result {
+        StepResult::Verdict(StepVerdict::Ok) => {
+            println!("OK ......... ({duration_str})");
+        }
+        StepResult::Verdict(StepVerdict::Warn(msg)) => {
+            println!("WARN ....... {msg} ({duration_str})");
+        }
+        StepResult::Verdict(StepVerdict::Error(msg)) => {
+            println!("ERROR ...... {msg} ({duration_str})");
+        }
+        StepResult::ProtocolError(msg) => {
+            println!("FAIL ....... protocol error: {msg} ({duration_str})");
+        }
+        StepResult::Timeout => {
+            println!("FAIL ....... step timed out ({duration_str})");
+        }
+        StepResult::ProviderFailed(msg) => {
+            println!("FAIL ....... provider error: {msg} ({duration_str})");
+        }
+    }
+}
+
+/// Print a summary of the full run after all steps have completed.
+fn print_run_summary(outcomes: &[StepOutcome], total_duration: Duration, total_steps: usize) {
+    println!();
+    println!("═══════════════════════════════════════════════════");
+
+    let completed = outcomes.len();
+    let ok_count = outcomes
+        .iter()
+        .filter(|o| matches!(o.result, StepResult::Verdict(StepVerdict::Ok)))
+        .count();
+    let warn_count = outcomes
+        .iter()
+        .filter(|o| matches!(o.result, StepResult::Verdict(StepVerdict::Warn(_))))
+        .count();
+    let fail_count = outcomes.iter().filter(|o| o.result.is_failure()).count();
+    let skipped = total_steps - completed;
+
+    let all_passed = outcomes.iter().all(|o| o.result.is_pass());
+    let status = if all_passed { "PASSED" } else { "FAILED" };
+
+    println!(
+        "Run {status}: {ok_count} ok, {warn_count} warn, {fail_count} failed, {skipped} skipped ({:.1}s)",
+        total_duration.as_secs_f64()
+    );
+    println!("═══════════════════════════════════════════════════");
 }
 
 /// Execute a single step, collecting transcript and parsing the result.

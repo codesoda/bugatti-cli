@@ -33,6 +33,8 @@
 - `parse_result_marker()` scans output lines in reverse for RESULT OK/WARN/ERROR contract markers
 - Executor stops on first hard failure (ERROR/timeout/protocol error); WARN is a pass and continues
 - Transcript artifacts: per-step `step_NNNN.txt` + combined `full_transcript.txt` under transcripts/
+- BUGATTI_LOG events: parsed via `parse_log_events()` in executor; stored in `StepOutcome.log_events` and written to `logs/bugatti_log_events.txt`
+- Console log rendering format: `LOG ........ <message>`
 
 ---
 
@@ -184,4 +186,34 @@
   - Result parsing scans lines in reverse — last RESULT marker wins
   - Transcript artifacts: per-step `step_NNNN.txt` + combined `full_transcript.txt`
   - MockSession pattern with pre-loaded response vectors is effective for testing execution flow
+---
+
+## 2026-03-27 - US-013
+- Implemented BUGATTI_LOG line recognition and LogEvent parsing from provider output
+- Added `LogEvent` type with run_id, step_id, and message fields
+- `parse_log_events()` extracts BUGATTI_LOG lines from transcript text
+- Log events stored in `StepOutcome.log_events`, separate from raw transcript
+- Log events written to `logs/bugatti_log_events.txt` (separate from transcript and diagnostics)
+- Console output renders log events as `LOG ........ <message>` during execution
+- Files changed: src/executor.rs
+- **Learnings for future iterations:**
+  - Use `trim_start()` not `trim()` when extracting prefixed messages, to preserve trailing content
+  - Log events file is only created when events exist (avoid empty artifact files)
+  - BUGATTI_LOG lines remain in raw transcript (unfiltered); separate storage is additive
+- Console output format: `STEP N/M ... <instruction> (from <file>)` for step begin, `OK/WARN/ERROR ....... <detail> (<duration>)` for step result
+- `print_run_summary()` renders final status with counts of ok/warn/failed/skipped steps
+- `truncate_instruction()` limits instruction text to first line, max 60 chars for readability
+---
+
+## 2026-03-27 - US-014
+- Added step begin console output: `STEP N/M ... <instruction> (from <source_file>)`
+- Added step result console output: `OK/WARN/ERROR ....... <detail> (<duration>)`
+- Added final run summary: `Run PASSED/FAILED: N ok, N warn, N failed, N skipped (Xs)`
+- Helper functions: `truncate_instruction()`, `print_step_result()`, `print_run_summary()`
+- Files changed: src/executor.rs
+- **Learnings for future iterations:**
+  - Console output format uses consistent dot-padding pattern matching existing RUN/OK/SKIP/etc.
+  - Step begin shows 1-based step number (N/M), instruction summary (truncated), and source file
+  - Run summary uses box-drawing chars (═) for visual separation
+  - All console output from executor is synchronous println!() — no async or buffering needed
 ---
