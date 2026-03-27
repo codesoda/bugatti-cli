@@ -5,5 +5,6 @@ pub mod config;
 pub mod executor;
 pub mod expand;
 pub mod provider;
+pub mod report;
 pub mod run;
 pub mod test_file;
