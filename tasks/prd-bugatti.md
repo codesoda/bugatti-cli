@@ -139,10 +139,14 @@ Bugatti is not trying to replace low-level deterministic browser automation fram
 - [ ] During step execution, streamed provider output is surfaced live to the console and captured in transcript artifacts.
 - [ ] Reserved streamed log lines are recognized and recorded as step-scoped Bugatti log events.
 - [ ] A step is not considered complete until the provider emits an explicit final result marker.
-- [ ] The v1 final result contract is one of:
-  - `RESULT` followed by `OK`
-  - `RESULT` followed by `WARN: ...`
-  - `RESULT` followed by `ERROR: ...`
+- [ ] The v1 final result contract is a **two-line final result marker block** with this exact grammar:
+
+  ```text
+  <final-result-marker> ::= "RESULT" "\n" <final-status-line> "\n"
+
+  <final-status-line>   ::= "OK"
+                         | "WARN: " <free-text>
+                         | "ERROR: " <free-text>
 - [ ] Free-form reasoning, narration, and observations are allowed before the final result marker.
 - [ ] After the final result marker is received, Bugatti records the step outcome and advances to the next step or stops the run based on configured failure behavior.
 - [ ] If provider output ends without a valid final result marker, Bugatti marks the step as failed with a protocol error.
