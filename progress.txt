@@ -350,3 +350,15 @@
   - Best-effort report pattern: always attempt to write, log failures, continue with cleanup
   - `#[allow(clippy::too_many_arguments)]` for functions that genuinely need many parameters
 ---
+
+## 2026-03-27 - US-005
+- Verified existing implementation of include step expansion with cycle detection in `src/expand.rs`
+- All acceptance criteria already met: single include, glob, nested includes, direct/indirect cycle detection, provenance tracking, sequential step IDs
+- Module was already integrated in main.rs pipeline and used by integration tests
+- All 156 tests pass, typecheck clean — marked US-005 as passes: true
+- Files changed: prd.json (marked passes: true), progress.txt
+- **Learnings for future iterations:**
+  - The expand module uses `visited.remove()` after recursion to allow diamond-shaped includes (A->B, A->C, B->D, C->D) while still detecting cycles
+  - `glob` crate is used for pattern matching; results are sorted for deterministic order
+  - `canonicalize()` is used for cycle detection to handle symlinks and relative paths correctly
+---
