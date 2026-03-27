@@ -39,6 +39,23 @@
 - `ReportInput` struct collects all data needed for report generation (run IDs, config summary, outcome, artifact paths)
 - BUGATTI_LOG events are included in report only for WARN/ERROR steps, not OK steps
 - Report is always written regardless of pass/fail status
+- Structured tracing lives in `src/diagnostics.rs`; use `init_tracing()` to set up file-based tracing, returns `TracingGuard`
+- Tracing writes JSONL to `diagnostics/harness_trace.jsonl` under the run's artifact directory
+- `ArtifactKind` enum in diagnostics module: HarnessDiagnostics, AgentLogs, Transcript, Evidence, Report
+- `collect_artifact_refs()` gathers all artifact references from a completed run
+- Harness tracing events (via `tracing::info!/warn!/error!`) are distinct from BUGATTI_LOG events in storage
+- Use `tracing::info!` with structured fields (component, step_id, command, etc.) for harness lifecycle events
+- Evidence types live in `src/diagnostics.rs`: `EvidenceKind` enum (Screenshot, CommandLog, BrowserConsole, NetworkFailure, SqlCliEvidence) and `EvidenceRef` struct
+- `EvidenceRef.collection_error` carries error message when evidence collection fails; `is_available()` checks both path existence and no error
+- Evidence references are stored per-step in `StepOutcome.evidence_refs`; report renders them only for WARN/ERROR steps
+- `collect_artifact_refs()` scans screenshots/ dir for evidence files and includes them as `ArtifactKind::Evidence`
+- Discovery lives in `src/discovery.rs`; `discover_root_tests()` recursively finds *.test.toml files excluding hidden dirs and include_only files
+- `DiscoveryResult` separates successful tests from parse errors for per-file error reporting
+- Multi-test aggregate summary uses `print_aggregate_summary()` in main.rs with PASS/FAIL/ERROR per test
+- Exit codes live in `src/exit_code.rs`; constants: EXIT_OK(0), EXIT_STEP_ERROR(1), EXIT_CONFIG_ERROR(2), EXIT_PROVIDER_ERROR(3), EXIT_TIMEOUT(4), EXIT_INTERRUPTED(5)
+- `exit_code_for_run()` computes exit code from a `RunOutcome`; `aggregate_exit_code()` combines multiple runs
+- Ctrl+C handler uses `ctrlc` crate with global `AtomicBool` flag; checked between test runs in discovery mode
+- Exit codes documented in CLI `after_help` text via clap attribute
 
 ---
 
@@ -238,4 +255,73 @@
   - `let _ = writeln!(...)` pattern suppresses infallible write errors for best-effort content
   - Report uses markdown tables for structured data (metadata, config, artifacts)
   - `format_duration()` helper switches between seconds and minutes at 60s threshold
+---
+
+## 2026-03-27 - US-017
+- Refactored full_transcript.txt to be written incrementally during execution (not reconstructed after)
+- File opened at start of `execute_steps()`, each step appended immediately after completion
+- Added `artifact_errors: Vec<String>` field to `RunOutcome` to track capture failures
+- Per-step transcript write failures now use `tracing::error!` instead of `eprintln!`
+- Report now includes full_transcript.txt path in Artifacts table
+- Report includes "Artifact Capture Errors" section when capture failures occurred
+- Added `artifact_errors` field to `ReportInput` for passing errors to report compiler
+- Files changed: src/executor.rs, src/report.rs
+- **Learnings for future iterations:**
+  - Use a closure returning `std::io::Result<()>` for grouping multiple writes with `?` operator
+  - `drop(file)` explicitly flushes/closes the file handle before subsequent operations
+  - Adding fields to shared structs (RunOutcome, ReportInput) requires updating all test constructors
+  - `sed -i ''` with substitution is effective for bulk-adding fields to many test struct constructions
+---
+
+## 2026-03-27 - US-018
+- Added `EvidenceKind` enum with typed variants: Screenshot, CommandLog, BrowserConsole, NetworkFailure, SqlCliEvidence
+- Added `EvidenceRef` struct with kind, path, description, and optional `collection_error` field
+- Added `evidence_refs: Vec<EvidenceRef>` field to `StepOutcome` for per-step evidence tracking
+- Updated report to render evidence references for WARN/ERROR steps (hidden for OK steps)
+- Failed evidence collection noted in report via `collection_error` field
+- Updated `collect_artifact_refs()` to scan screenshots/ directory for evidence files
+- Files changed: src/diagnostics.rs, src/executor.rs, src/report.rs
+- **Learnings for future iterations:**
+  - Evidence references use durable paths under run directory, never inline payloads
+  - `EvidenceRef::is_available()` checks both file existence and no collection error
+  - Adding a field to `StepOutcome` requires updating all test constructors across modules (report.rs, executor.rs)
+  - Report evidence rendering follows same pattern as BUGATTI_LOG: only for non-OK steps
+---
+
+## 2026-03-27 - US-019
+- Implemented root test discovery in new `src/discovery.rs` module
+- `discover_root_tests()` recursively finds *.test.toml files under project root
+- Hidden directories (starting with `.`) are skipped (prevents scanning .bugatti, .git, etc.)
+- Files marked `include_only = true` are excluded from discovery results
+- Discovery order is deterministic: files and directories sorted by path
+- Parse errors collected per-file in `DiscoveryResult.errors` — discovery continues past individual failures
+- `DiscoveredTest` struct carries path and parsed name for display
+- Updated main.rs: no-arg `bugatti test` now discovers and runs all root tests
+- Aggregate summary prints PASS/FAIL/ERROR status for each test with totals
+- Exit code is non-zero if any test fails or has parse errors
+- Files changed: src/discovery.rs (new), src/lib.rs, src/main.rs
+- **Learnings for future iterations:**
+  - Recursive directory traversal with `read_dir` + sorted subdirectories ensures deterministic order
+  - Separating parse errors from successful tests allows reporting all errors before execution
+  - `collect_test_files()` helper keeps recursion logic separate from parse/filter logic
+  - Hidden directory skip prevents scanning .bugatti artifact directories (which could contain test-like files)
+---
+
+## 2026-03-27 - US-020
+- Implemented stable exit codes in new `src/exit_code.rs` module
+- Exit codes: 0 (all pass), 1 (step error), 2 (config/parse error), 3 (provider/readiness), 4 (timeout), 5 (interrupted)
+- `exit_code_for_run()` computes code from RunOutcome; `aggregate_exit_code()` for multi-test mode
+- Added Ctrl+C handler using `ctrlc` crate with global AtomicBool flag
+- Interrupted runs skip remaining tests with EXIT_INTERRUPTED code
+- Updated main.rs: `run_discovery()` now returns i32 exit code; `main()` calls `std::process::exit(code)`
+- `TestRunResult` now carries `exit_code`, `run_id`, and `report_path` fields
+- Aggregate summary distinguishes PASS/FAIL/SKIP status; prints run references after summary
+- Exit codes documented in CLI help via `after_help` clap attribute
+- Finalization order: record status -> flush artifacts -> stop subprocesses -> print summary -> exit
+- Files changed: src/exit_code.rs (new), src/main.rs, src/cli.rs, src/lib.rs, Cargo.toml
+- **Learnings for future iterations:**
+  - `ctrlc` crate is simpler than raw signal handling; uses `AtomicBool` for cross-thread safety
+  - `after_help` in clap command attribute is ideal for documenting exit codes
+  - `aggregate_exit_code()` takes max of all run codes to propagate most severe failure
+  - Return exit code as i32 from functions rather than calling `process::exit` inline for testability
 ---

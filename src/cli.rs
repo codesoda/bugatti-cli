@@ -2,7 +2,20 @@ use clap::{Parser, Subcommand};
 
 /// Bugatti - Agent-assisted local application verification
 #[derive(Parser, Debug)]
-#[command(name = "bugatti", version, about)]
+#[command(
+    name = "bugatti",
+    version,
+    about,
+    after_help = "\
+Exit codes:
+  0  All steps passed (OK or WARN)
+  1  One or more steps had ERROR results
+  2  Configuration, parse, or cycle error
+  3  Provider startup or readiness failure
+  4  Step execution timeout
+  5  Run was interrupted (Ctrl+C)
+"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

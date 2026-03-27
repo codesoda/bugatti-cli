@@ -92,8 +92,14 @@ impl AgentSession for ClaudeCodeAdapter {
     where
         Self: Sized,
     {
+        tracing::info!(provider = "claude-code", "initializing provider");
         let binary_path = Self::find_binary()?;
         let session_id = uuid::Uuid::new_v4().to_string();
+        tracing::info!(
+            binary = %binary_path.display(),
+            session_id = %session_id,
+            "claude-code provider initialized"
+        );
 
         Ok(Self {
             binary_path,
@@ -106,6 +112,7 @@ impl AgentSession for ClaudeCodeAdapter {
     }
 
     fn start(&mut self) -> Result<(), ProviderError> {
+        tracing::info!("claude-code session started");
         self.started = true;
         Ok(())
     }

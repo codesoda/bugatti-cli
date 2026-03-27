@@ -170,6 +170,12 @@ pub fn initialize_run(
 ) -> Result<(RunId, SessionId, ArtifactDir), ArtifactError> {
     let run_id = RunId::new();
     let session_id = SessionId::new();
+    tracing::info!(
+        run_id = %run_id,
+        session_id = %session_id,
+        test_file = %root_test_file.display(),
+        "initializing run"
+    );
     let artifact_dir = ArtifactDir::from_run_id(project_root, &run_id);
 
     artifact_dir.create_all()?;

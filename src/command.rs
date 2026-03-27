@@ -143,6 +143,7 @@ fn execute_short_lived(
     def: &CommandDef,
     logs_dir: &Path,
 ) -> Result<CommandResult, CommandError> {
+    tracing::info!(command = name, cmd = %def.cmd, "executing short-lived command");
     println!("RUN ........ {name}: {}", def.cmd);
 
     let output = Command::new("sh")
@@ -170,6 +171,7 @@ fn execute_short_lived(
     let exit_code = output.status.code();
 
     if !output.status.success() {
+        tracing::error!(command = name, exit_code = ?exit_code, "short-lived command failed");
         return Err(CommandError::NonZeroExit {
             name: name.to_string(),
             exit_code,
@@ -177,6 +179,7 @@ fn execute_short_lived(
         });
     }
 
+    tracing::info!(command = name, exit_code = ?exit_code, "short-lived command succeeded");
     Ok(CommandResult {
         name: name.to_string(),
         exit_code,
@@ -254,6 +257,7 @@ pub fn spawn_long_lived_commands(
             continue;
         }
 
+        tracing::info!(command = name.as_str(), cmd = %def.cmd, "spawning long-lived command");
         println!("START ...... {name}: {}", def.cmd);
 
         let stdout_path = artifact_dir.logs.join(format!("{name}.stdout.log"));
@@ -313,16 +317,31 @@ pub fn spawn_long_lived_commands(
 
 /// Poll a readiness URL until it responds with a success status or timeout.
 fn poll_readiness(url: &str, timeout: Duration) -> Result<(), String> {
+    tracing::info!(
+        url = url,
+        timeout_secs = timeout.as_secs(),
+        "starting readiness poll"
+    );
     let start = Instant::now();
 
     while start.elapsed() < timeout {
         // Try a simple TCP connection check by parsing the URL and connecting
         if check_url(url) {
+            tracing::info!(
+                url = url,
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "readiness check passed"
+            );
             return Ok(());
         }
         std::thread::sleep(READINESS_POLL_INTERVAL);
     }
 
+    tracing::error!(
+        url = url,
+        timeout_secs = timeout.as_secs(),
+        "readiness check timed out"
+    );
     Err(format!(
         "timed out after {}s waiting for {url}",
         timeout.as_secs()
@@ -356,10 +375,17 @@ pub fn check_for_unexpected_exits(
 /// Tear down all tracked long-lived processes by sending SIGTERM.
 /// Returns results describing the outcome for each process.
 pub fn teardown_processes(processes: &mut [TrackedProcess]) -> Vec<TeardownResult> {
+    tracing::info!(count = processes.len(), "tearing down long-lived processes");
     let mut results = Vec::new();
 
     for process in processes.iter_mut() {
         let result = teardown_single(process);
+        tracing::info!(
+            command = result.name.as_str(),
+            success = result.success,
+            message = result.message.as_str(),
+            "teardown result"
+        );
         results.push(result);
     }
 

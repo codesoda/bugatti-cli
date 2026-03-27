@@ -119,10 +119,28 @@ impl std::error::Error for ConfigError {}
 /// Returns `Err` if the file exists but cannot be read or parsed.
 pub fn load_config(dir: &Path) -> Result<Config, ConfigError> {
     let path = dir.join("bugatti.config.toml");
+    tracing::info!(path = %path.display(), "loading config");
     match std::fs::read_to_string(&path) {
-        Ok(contents) => toml::from_str(&contents).map_err(ConfigError::ParseError),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(e) => Err(ConfigError::ReadError(e)),
+        Ok(contents) => {
+            let config: Config = toml::from_str(&contents).map_err(|e| {
+                tracing::error!(path = %path.display(), error = %e, "config parse failed");
+                ConfigError::ParseError(e)
+            })?;
+            tracing::info!(
+                provider = %config.provider.name,
+                commands = config.commands.len(),
+                "config loaded"
+            );
+            Ok(config)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!("no config file found, using defaults");
+            Ok(Config::default())
+        }
+        Err(e) => {
+            tracing::error!(path = %path.display(), error = %e, "config read failed");
+            Err(ConfigError::ReadError(e))
+        }
     }
 }
 

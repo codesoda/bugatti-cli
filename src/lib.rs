@@ -5,6 +5,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod discovery;
 pub mod executor;
+pub mod exit_code;
 pub mod expand;
 pub mod provider;
 pub mod report;
