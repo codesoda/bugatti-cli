@@ -1,0 +1,10 @@
+[package]
+name = "bugatti"
+version = "0.1.0"
+edition = "2021"
+description = "A CLI for plain-English, agent-assisted local application verification using *.test.toml files"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
