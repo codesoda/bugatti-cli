@@ -5,6 +5,39 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// The prefix that marks a log event line in provider output.
+const BUGATTI_LOG_PREFIX: &str = "BUGATTI_LOG ";
+
+/// A log event parsed from provider output during step execution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogEvent {
+    /// The run this log event belongs to.
+    pub run_id: String,
+    /// The step that produced this log event.
+    pub step_id: usize,
+    /// The log message text.
+    pub message: String,
+}
+
+/// Parse BUGATTI_LOG lines from text, returning extracted log events.
+///
+/// Lines matching 'BUGATTI_LOG <message>' are recognized.
+/// Each matching line produces a LogEvent with the given run_id and step_id.
+pub fn parse_log_events(text: &str, run_id: &str, step_id: usize) -> Vec<LogEvent> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            trimmed
+                .strip_prefix(BUGATTI_LOG_PREFIX)
+                .map(|msg| LogEvent {
+                    run_id: run_id.to_string(),
+                    step_id,
+                    message: msg.to_string(),
+                })
+        })
+        .collect()
+}
+
 /// Default step timeout in seconds.
 const DEFAULT_STEP_TIMEOUT_SECS: u64 = 300;
 
@@ -39,6 +72,8 @@ pub struct StepOutcome {
     pub result: StepResult,
     /// Full transcript text captured from the provider.
     pub transcript: String,
+    /// BUGATTI_LOG events parsed from provider output, separate from transcript.
+    pub log_events: Vec<LogEvent>,
     /// How long the step took.
     pub duration: Duration,
 }
@@ -202,6 +237,14 @@ pub fn execute_steps(
             Err((transcript_text, err_result)) => (err_result, transcript_text),
         };
 
+        // Parse BUGATTI_LOG events from the transcript
+        let log_events = parse_log_events(&transcript, &run_id.0, step.step_id);
+
+        // Render log events to console
+        for event in &log_events {
+            println!("LOG ........ {}", event.message);
+        }
+
         // Write transcript artifact for this step
         let transcript_path = artifact_dir
             .transcripts
@@ -219,6 +262,7 @@ pub fn execute_steps(
             source_file: step.source_file.clone(),
             result: step_result,
             transcript,
+            log_events,
             duration,
         };
 
@@ -245,6 +289,17 @@ pub fn execute_steps(
             let _ = writeln!(f, "---");
             let _ = writeln!(f, "{}", outcome.transcript);
             let _ = writeln!(f);
+        }
+    }
+
+    // Write log events to a separate file (distinct from transcript and diagnostics)
+    let log_events_path = artifact_dir.logs.join("bugatti_log_events.txt");
+    let all_log_events: Vec<&LogEvent> = outcomes.iter().flat_map(|o| &o.log_events).collect();
+    if !all_log_events.is_empty() {
+        if let Ok(mut f) = std::fs::File::create(&log_events_path) {
+            for event in &all_log_events {
+                let _ = writeln!(f, "[step {}] {}", event.step_id, event.message);
+            }
         }
     }
 
@@ -769,5 +824,149 @@ mod tests {
         assert!(outcome.all_passed);
         assert!(outcome.steps[0].transcript.contains("First chunk."));
         assert!(outcome.steps[0].transcript.contains("Second chunk."));
+    }
+
+    // --- BUGATTI_LOG parsing tests ---
+
+    #[test]
+    fn parse_log_events_single_line() {
+        let events = parse_log_events("BUGATTI_LOG Server started on port 3000", "run-1", 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].run_id, "run-1");
+        assert_eq!(events[0].step_id, 0);
+        assert_eq!(events[0].message, "Server started on port 3000");
+    }
+
+    #[test]
+    fn parse_log_events_multiple_lines() {
+        let text = "Some output\nBUGATTI_LOG first event\nMore output\nBUGATTI_LOG second event\nRESULT OK";
+        let events = parse_log_events(text, "run-2", 3);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].message, "first event");
+        assert_eq!(events[0].step_id, 3);
+        assert_eq!(events[1].message, "second event");
+    }
+
+    #[test]
+    fn parse_log_events_none_found() {
+        let events = parse_log_events("No log events here\nRESULT OK", "run-1", 0);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_log_events_whitespace_trimmed() {
+        let events = parse_log_events("  BUGATTI_LOG trimmed message  ", "run-1", 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].message, "trimmed message  ");
+    }
+
+    #[test]
+    fn parse_log_events_prefix_only_no_message() {
+        // "BUGATTI_LOG " with trailing space but no content - still valid, empty message
+        let events = parse_log_events("BUGATTI_LOG ", "run-1", 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].message, "");
+    }
+
+    #[test]
+    fn parse_log_events_no_space_after_prefix_not_matched() {
+        // "BUGATTI_LOG" without trailing space is not matched (prefix is "BUGATTI_LOG ")
+        let events = parse_log_events("BUGATTI_LOG", "run-1", 0);
+        assert!(events.is_empty());
+    }
+
+    // --- BUGATTI_LOG in execution tests ---
+
+    #[test]
+    fn execute_steps_captures_log_events() {
+        let steps = vec![test_steps().remove(0)];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![vec![
+            Ok(OutputChunk::Text(
+                "Starting check\nBUGATTI_LOG Database connected\nBUGATTI_LOG Schema validated\nRESULT OK".to_string(),
+            )),
+            Ok(OutputChunk::Done),
+        ]]);
+
+        let outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+        )
+        .unwrap();
+
+        assert!(outcome.all_passed);
+        assert_eq!(outcome.steps[0].log_events.len(), 2);
+        assert_eq!(outcome.steps[0].log_events[0].message, "Database connected");
+        assert_eq!(outcome.steps[0].log_events[0].run_id, "test-run-001");
+        assert_eq!(outcome.steps[0].log_events[0].step_id, 0);
+        assert_eq!(outcome.steps[0].log_events[1].message, "Schema validated");
+    }
+
+    #[test]
+    fn execute_steps_no_log_events() {
+        let steps = vec![test_steps().remove(0)];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![vec![
+            Ok(OutputChunk::Text("No logs here.\nRESULT OK".to_string())),
+            Ok(OutputChunk::Done),
+        ]]);
+
+        let outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+        )
+        .unwrap();
+
+        assert!(outcome.steps[0].log_events.is_empty());
+        // No log events file should be created when there are no events
+        let log_events_path = artifact_dir.logs.join("bugatti_log_events.txt");
+        assert!(!log_events_path.exists());
+    }
+
+    #[test]
+    fn execute_steps_writes_log_events_file() {
+        let steps = vec![test_steps().remove(0)];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![vec![
+            Ok(OutputChunk::Text(
+                "BUGATTI_LOG Migration complete\nRESULT OK".to_string(),
+            )),
+            Ok(OutputChunk::Done),
+        ]]);
+
+        let _outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+        )
+        .unwrap();
+
+        // Log events file should exist and be separate from transcript
+        let log_events_path = artifact_dir.logs.join("bugatti_log_events.txt");
+        assert!(log_events_path.is_file());
+        let contents = std::fs::read_to_string(&log_events_path).unwrap();
+        assert!(contents.contains("[step 0] Migration complete"));
+
+        // Transcript should still contain the BUGATTI_LOG line (raw transcript is unfiltered)
+        let transcript_path = artifact_dir.transcripts.join("step_0000.txt");
+        let transcript = std::fs::read_to_string(&transcript_path).unwrap();
+        assert!(transcript.contains("BUGATTI_LOG Migration complete"));
     }
 }
