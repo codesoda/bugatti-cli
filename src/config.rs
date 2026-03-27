@@ -1,3 +1,4 @@
+use crate::test_file::ProviderOverrides;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -56,6 +57,42 @@ pub enum CommandKind {
     LongLived,
 }
 
+impl ProviderConfig {
+    /// Merge per-test provider overrides over this config.
+    /// Override fields that are `Some` replace the global values;
+    /// `None` fields preserve the global values.
+    pub fn merge_overrides(&self, overrides: &ProviderOverrides) -> ProviderConfig {
+        ProviderConfig {
+            name: overrides.name.clone().unwrap_or_else(|| self.name.clone()),
+            extra_system_prompt: overrides
+                .extra_system_prompt
+                .clone()
+                .or_else(|| self.extra_system_prompt.clone()),
+            agent_args: overrides
+                .agent_args
+                .clone()
+                .unwrap_or_else(|| self.agent_args.clone()),
+        }
+    }
+}
+
+/// Compute the effective config by merging test file overrides over the global config.
+/// The resulting config has the same commands but provider settings may be overridden.
+pub fn effective_config(global: &Config, test_file: &crate::test_file::TestFile) -> Config {
+    let provider = match test_file
+        .overrides
+        .as_ref()
+        .and_then(|o| o.provider.as_ref())
+    {
+        Some(overrides) => global.provider.merge_overrides(overrides),
+        None => global.provider.clone(),
+    };
+    Config {
+        provider,
+        commands: global.commands.clone(),
+    }
+}
+
 /// Error type for config loading.
 #[derive(Debug)]
 pub enum ConfigError {
@@ -92,6 +129,7 @@ pub fn load_config(dir: &Path) -> Result<Config, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_file::{ProviderOverrides, Step, TestFile, TestOverrides};
     use std::fs;
 
     #[test]
@@ -161,6 +199,115 @@ readiness_url = "http://localhost:3000/health"
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("invalid bugatti.config.toml"));
+    }
+
+    #[test]
+    fn merge_full_overrides() {
+        let global = Config {
+            provider: ProviderConfig {
+                name: "claude-code".to_string(),
+                extra_system_prompt: Some("Global prompt".to_string()),
+                agent_args: vec!["--verbose".to_string()],
+            },
+            commands: BTreeMap::new(),
+        };
+        let test_file = TestFile {
+            name: "test".to_string(),
+            include_only: false,
+            overrides: Some(TestOverrides {
+                provider: Some(ProviderOverrides {
+                    name: Some("openai".to_string()),
+                    extra_system_prompt: Some("Override prompt".to_string()),
+                    agent_args: Some(vec!["--model".to_string(), "gpt-4".to_string()]),
+                }),
+            }),
+            steps: vec![],
+        };
+
+        let effective = effective_config(&global, &test_file);
+        assert_eq!(effective.provider.name, "openai");
+        assert_eq!(
+            effective.provider.extra_system_prompt,
+            Some("Override prompt".to_string())
+        );
+        assert_eq!(
+            effective.provider.agent_args,
+            vec!["--model".to_string(), "gpt-4".to_string()]
+        );
+        // Commands are preserved from global config
+        assert_eq!(effective.commands, global.commands);
+    }
+
+    #[test]
+    fn merge_partial_overrides() {
+        let global = Config {
+            provider: ProviderConfig {
+                name: "claude-code".to_string(),
+                extra_system_prompt: Some("Global prompt".to_string()),
+                agent_args: vec!["--verbose".to_string()],
+            },
+            commands: BTreeMap::new(),
+        };
+        let test_file = TestFile {
+            name: "test".to_string(),
+            include_only: false,
+            overrides: Some(TestOverrides {
+                provider: Some(ProviderOverrides {
+                    name: Some("openai".to_string()),
+                    extra_system_prompt: None,
+                    agent_args: None,
+                }),
+            }),
+            steps: vec![],
+        };
+
+        let effective = effective_config(&global, &test_file);
+        assert_eq!(effective.provider.name, "openai");
+        // Unset override fields preserve global values
+        assert_eq!(
+            effective.provider.extra_system_prompt,
+            Some("Global prompt".to_string())
+        );
+        assert_eq!(effective.provider.agent_args, vec!["--verbose".to_string()]);
+    }
+
+    #[test]
+    fn merge_no_overrides() {
+        let global = Config {
+            provider: ProviderConfig {
+                name: "claude-code".to_string(),
+                extra_system_prompt: Some("Global prompt".to_string()),
+                agent_args: vec!["--verbose".to_string()],
+            },
+            commands: BTreeMap::new(),
+        };
+        let test_file = TestFile {
+            name: "test".to_string(),
+            include_only: false,
+            overrides: None,
+            steps: vec![Step {
+                instruction: Some("Do something".to_string()),
+                include_path: None,
+                include_glob: None,
+            }],
+        };
+
+        let effective = effective_config(&global, &test_file);
+        assert_eq!(effective.provider, global.provider);
+    }
+
+    #[test]
+    fn merge_empty_overrides_section() {
+        let global = Config::default();
+        let test_file = TestFile {
+            name: "test".to_string(),
+            include_only: false,
+            overrides: Some(TestOverrides { provider: None }),
+            steps: vec![],
+        };
+
+        let effective = effective_config(&global, &test_file);
+        assert_eq!(effective.provider, global.provider);
     }
 
     #[test]
