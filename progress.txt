@@ -324,4 +324,29 @@
   - `after_help` in clap command attribute is ideal for documenting exit codes
   - `aggregate_exit_code()` takes max of all run codes to propagate most severe failure
   - Return exit code as i32 from functions rather than calling `process::exit` inline for testability
+- Full pipeline order in main.rs: config -> parse -> effective_config -> validate_skip_cmds -> expand -> initialize_run -> init_tracing -> short-lived cmds -> long-lived cmds -> provider init -> execute_steps -> close -> teardown -> report -> exit
+- Integration tests live in `tests/pipeline_integration.rs`; use mock `AgentSession` impl for provider-free testing
+- `write_best_effort_report()` in main.rs centralizes report writing with error logging (always attempt, never fatal)
+---
+
+## 2026-03-27 - US-021
+- Wired the full end-to-end pipeline in main.rs: config load -> parse -> expand -> artifact setup -> tracing -> command setup -> provider init -> step execution -> report -> teardown -> exit
+- Single-file mode (`bugatti test <path>`) now runs the complete pipeline instead of placeholder
+- Discovery mode (`bugatti test`) now passes skip_cmds through to each test run
+- Every error phase produces best-effort report writing and subprocess teardown
+- `write_best_effort_report()` helper centralizes report writing with error logging
+- `run_test_pipeline()` handles pre-artifact failures; `run_test_with_artifacts()` handles post-artifact phases
+- Created integration test suite (`tests/pipeline_integration.rs`) with 6 tests:
+  - `full_pipeline_with_mock_provider`: exercises the complete pipeline with a mock provider
+  - `pipeline_fails_on_invalid_config`: config errors fail before execution
+  - `pipeline_fails_on_invalid_test_file`: parse errors fail before execution
+  - `pipeline_fails_on_cycle`: cycle detection fails before execution
+  - `pipeline_with_error_step_exits_nonzero`: ERROR steps produce non-zero exit
+  - `report_generated_for_failed_run`: reports are generated for failed runs
+- Files changed: src/main.rs, tests/pipeline_integration.rs (new), prd.json
+- **Learnings for future iterations:**
+  - Integration tests can use a mock `AgentSession` impl to test the pipeline without a real provider
+  - `chrono::Utc::now()` and `to_rfc3339()` are used for report timestamps
+  - Best-effort report pattern: always attempt to write, log failures, continue with cleanup
+  - `#[allow(clippy::too_many_arguments)]` for functions that genuinely need many parameters
 ---
