@@ -1,3 +1,4 @@
+use crate::diagnostics::EvidenceRef;
 use crate::executor::{RunOutcome, StepOutcome, StepResult, StepVerdict};
 use crate::run::{ArtifactDir, EffectiveConfigSummary, RunId, SessionId};
 use std::fmt::Write as FmtWrite;
@@ -212,9 +213,9 @@ fn write_step_section(report: &mut String, outcome: &StepOutcome, artifact_dir: 
     let _ = writeln!(report, "- **Transcript:** `{}`", transcript_path.display());
 
     // Include log events for WARN/ERROR steps
-    if !outcome.log_events.is_empty()
-        && !matches!(outcome.result, StepResult::Verdict(StepVerdict::Ok))
-    {
+    let is_non_ok = !matches!(outcome.result, StepResult::Verdict(StepVerdict::Ok));
+
+    if !outcome.log_events.is_empty() && is_non_ok {
         let _ = writeln!(report);
         let _ = writeln!(report, "**BUGATTI_LOG events:**");
         let _ = writeln!(report);
@@ -223,7 +224,35 @@ fn write_step_section(report: &mut String, outcome: &StepOutcome, artifact_dir: 
         }
     }
 
+    // Include evidence references for WARN/ERROR steps
+    if !outcome.evidence_refs.is_empty() && is_non_ok {
+        let _ = writeln!(report);
+        let _ = writeln!(report, "**Evidence:**");
+        let _ = writeln!(report);
+        write_evidence_refs(report, &outcome.evidence_refs);
+    }
+
     let _ = writeln!(report);
+}
+
+fn write_evidence_refs(report: &mut String, refs: &[EvidenceRef]) {
+    for evidence in refs {
+        if let Some(err) = &evidence.collection_error {
+            let _ = writeln!(
+                report,
+                "- **{}:** _collection failed: {}_",
+                evidence.kind, err
+            );
+        } else {
+            let _ = writeln!(
+                report,
+                "- **{}:** `{}` — {}",
+                evidence.kind,
+                evidence.path.display(),
+                evidence.description
+            );
+        }
+    }
 }
 
 fn write_config_summary(report: &mut String, summary: &EffectiveConfigSummary) {
@@ -308,6 +337,7 @@ mod tests {
             result: StepResult::Verdict(StepVerdict::Ok),
             transcript: format!("Checked.\nRESULT OK"),
             log_events: vec![],
+            evidence_refs: vec![],
             duration: Duration::from_millis(1500),
         }
     }
@@ -324,6 +354,7 @@ mod tests {
                 step_id,
                 message: "slow response".to_string(),
             }],
+            evidence_refs: vec![],
             duration: Duration::from_millis(3200),
         }
     }
@@ -349,6 +380,7 @@ mod tests {
                     message: "Retried once".to_string(),
                 },
             ],
+            evidence_refs: vec![],
             duration: Duration::from_millis(5000),
         }
     }
@@ -591,6 +623,7 @@ mod tests {
                 result: StepResult::ProtocolError("no RESULT marker".to_string()),
                 transcript: "Some output without marker".to_string(),
                 log_events: vec![],
+                evidence_refs: vec![],
                 duration: Duration::from_millis(2000),
             }],
             all_passed: false,
@@ -751,5 +784,108 @@ mod tests {
         let report = compile_report(&input);
 
         assert!(!report.contains("## Artifact Capture Errors"));
+    }
+
+    #[test]
+    fn compile_report_error_step_with_evidence() {
+        use crate::diagnostics::{EvidenceKind, EvidenceRef};
+
+        let run_id = RunId("test-run-001".to_string());
+        let session_id = SessionId("test-session-001".to_string());
+        let (_tmp, artifact_dir) = test_artifact_dir();
+        let summary = test_config_summary();
+
+        let mut step = make_error_step(0, "login button missing");
+        step.evidence_refs = vec![
+            EvidenceRef {
+                kind: EvidenceKind::Screenshot,
+                path: PathBuf::from("screenshots/step_0_login.png"),
+                description: "Login page after failed attempt".to_string(),
+                collection_error: None,
+            },
+            EvidenceRef {
+                kind: EvidenceKind::BrowserConsole,
+                path: PathBuf::from("logs/console_step_0.txt"),
+                description: "Browser console output".to_string(),
+                collection_error: None,
+            },
+        ];
+
+        let outcome = RunOutcome {
+            steps: vec![step],
+            all_passed: false,
+            total_duration: Duration::from_millis(5000),
+            artifact_errors: vec![],
+        };
+
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let report = compile_report(&input);
+
+        assert!(report.contains("**Evidence:**"));
+        assert!(report.contains("**Screenshot:**"));
+        assert!(report.contains("step_0_login.png"));
+        assert!(report.contains("**Browser Console:**"));
+        assert!(report.contains("console_step_0.txt"));
+    }
+
+    #[test]
+    fn compile_report_ok_step_excludes_evidence() {
+        use crate::diagnostics::{EvidenceKind, EvidenceRef};
+
+        let run_id = RunId("test-run-001".to_string());
+        let session_id = SessionId("test-session-001".to_string());
+        let (_tmp, artifact_dir) = test_artifact_dir();
+        let summary = test_config_summary();
+
+        let mut step = make_ok_step(0, "Check homepage");
+        step.evidence_refs = vec![EvidenceRef {
+            kind: EvidenceKind::Screenshot,
+            path: PathBuf::from("screenshots/step_0.png"),
+            description: "Homepage screenshot".to_string(),
+            collection_error: None,
+        }];
+
+        let outcome = RunOutcome {
+            steps: vec![step],
+            all_passed: true,
+            total_duration: Duration::from_millis(1500),
+            artifact_errors: vec![],
+        };
+
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let report = compile_report(&input);
+
+        assert!(!report.contains("**Evidence:**"));
+    }
+
+    #[test]
+    fn compile_report_evidence_collection_failure_noted() {
+        use crate::diagnostics::{EvidenceKind, EvidenceRef};
+
+        let run_id = RunId("test-run-001".to_string());
+        let session_id = SessionId("test-session-001".to_string());
+        let (_tmp, artifact_dir) = test_artifact_dir();
+        let summary = test_config_summary();
+
+        let mut step = make_error_step(0, "page not loading");
+        step.evidence_refs = vec![EvidenceRef {
+            kind: EvidenceKind::Screenshot,
+            path: PathBuf::from("screenshots/step_0.png"),
+            description: "Screenshot attempt".to_string(),
+            collection_error: Some("browser not available".to_string()),
+        }];
+
+        let outcome = RunOutcome {
+            steps: vec![step],
+            all_passed: false,
+            total_duration: Duration::from_millis(5000),
+            artifact_errors: vec![],
+        };
+
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let report = compile_report(&input);
+
+        assert!(report.contains("**Evidence:**"));
+        assert!(report.contains("collection failed: browser not available"));
     }
 }

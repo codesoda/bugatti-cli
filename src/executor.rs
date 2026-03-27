@@ -1,3 +1,4 @@
+use crate::diagnostics::EvidenceRef;
 use crate::expand::ExpandedStep;
 use crate::provider::{AgentSession, OutputChunk, ProviderError, StepMessage};
 use crate::run::{ArtifactDir, RunId, SessionId};
@@ -74,6 +75,9 @@ pub struct StepOutcome {
     pub transcript: String,
     /// BUGATTI_LOG events parsed from provider output, separate from transcript.
     pub log_events: Vec<LogEvent>,
+    /// Evidence references collected during this step (screenshots, command logs, etc.).
+    /// Missing or failed evidence collection is noted via `EvidenceRef::collection_error`.
+    pub evidence_refs: Vec<EvidenceRef>,
     /// How long the step took.
     pub duration: Duration,
 }
@@ -337,6 +341,7 @@ pub fn execute_steps(
             result: step_result,
             transcript,
             log_events,
+            evidence_refs: vec![],
             duration,
         };
 
