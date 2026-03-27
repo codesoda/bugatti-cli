@@ -19,6 +19,11 @@
 - Use `teardown_processes()` to SIGTERM all tracked processes at run end
 - Readiness checks use `curl -sf` subprocess; polls every 500ms with 30s timeout
 - `libc` crate is used for SIGTERM on unix; `child.kill()` fallback on non-unix
+- make sure you reload prd.json everytime
+- never use curl for readiness checks, always load readiness checks with reqwest helpers to ensure cross platform
+- Provider trait lives in `src/provider.rs`; `AgentSession` trait defines the provider-agnostic interface
+- Provider messages carry `RunId`, `SessionId`, and `step_id` for traceability
+- Streaming uses `Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>>>` (synchronous iterator pattern)
 
 ---
 
@@ -112,4 +117,28 @@
   - `libc::kill(pid, libc::SIGTERM)` for graceful shutdown on unix
   - clippy requires `&mut [T]` instead of `&mut Vec<T>` for function params
   - Readiness checks should tear down already-started processes on failure
+---
+
+## 2026-03-27 - US-009
+- Added `--skip-cmd <name>` flag to `bugatti test` subcommand (repeatable via clap `Vec<String>`)
+- Added `validate_skip_cmds()` function that checks skip names against known config commands before execution
+- Readiness checks for skipped long-lived commands still run by default (user may have the service running externally)
+- Console output shows SKIP status for skipped commands, and "(skipped)" annotations on readiness checks
+- Files changed: src/cli.rs, src/command.rs, src/main.rs
+- **Learnings for future iterations:**
+  - clap `Vec<String>` with `#[arg(long = "skip-cmd")]` supports repeated flags naturally
+  - Skipped command readiness checks are important when user runs services externally
+  - `validate_skip_cmds` should be called before any execution begins, similar to effective_config computation
+---
+
+## 2026-03-27 - US-010
+- Defined `AgentSession` trait in `src/provider.rs` with methods: initialize, start, send_bootstrap, send_step, close
+- Defined supporting types: `StepMessage`, `BootstrapMessage`, `OutputChunk`, `ProviderError`
+- Trait receives resolved `Config` (not raw TOML), messages carry `RunId`, `SessionId`, `step_id`
+- Uses synchronous iterator pattern for streamed output (`Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>>>`)
+- Files changed: src/provider.rs (new), src/lib.rs
+- **Learnings for future iterations:**
+  - Synchronous iterator pattern avoids async runtime dependency while supporting streaming
+  - `ProviderError` enum covers full lifecycle: init, start, send, stream, shutdown, crash
+  - `OutputChunk::Done` marker signals end of provider response for a message
 ---
