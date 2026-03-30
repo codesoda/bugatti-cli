@@ -7,9 +7,6 @@ use std::path::Path;
 pub struct TestFile {
     /// Name of the test.
     pub name: String,
-    /// If true, this file can only be included by other test files, not run directly.
-    #[serde(default)]
-    pub include_only: bool,
     /// Optional per-test overrides.
     #[serde(default)]
     pub overrides: Option<TestOverrides>,
@@ -34,6 +31,7 @@ pub struct ProviderOverrides {
     pub extra_system_prompt: Option<String>,
     pub agent_args: Option<Vec<String>>,
     pub step_timeout_secs: Option<u64>,
+    pub base_url: Option<String>,
 }
 
 /// A single step in a test file — either an instruction or an include.
@@ -46,6 +44,8 @@ pub struct Step {
     pub include_path: Option<String>,
     /// Glob pattern to include multiple test files inline.
     pub include_glob: Option<String>,
+    /// Optional per-step timeout override in seconds.
+    pub step_timeout_secs: Option<u64>,
 }
 
 /// Error type for test file parsing.
@@ -157,7 +157,6 @@ instruction = "Enter valid credentials and submit"
 
         let test_file = parse_test_file(&path).unwrap();
         assert_eq!(test_file.name, "Login flow test");
-        assert!(!test_file.include_only);
         assert!(test_file.overrides.is_none());
         assert_eq!(test_file.steps.len(), 2);
         assert_eq!(
@@ -229,26 +228,6 @@ instruction = "Do something"
         assert_eq!(provider.name.as_deref(), Some("openai"));
         assert_eq!(provider.extra_system_prompt.as_deref(), Some("Be brief"));
         assert!(provider.agent_args.is_none());
-    }
-
-    #[test]
-    fn parse_include_only_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("shared.test.toml");
-        fs::write(
-            &path,
-            r#"
-name = "Shared setup steps"
-include_only = true
-
-[[steps]]
-instruction = "Run migrations"
-"#,
-        )
-        .unwrap();
-
-        let test_file = parse_test_file(&path).unwrap();
-        assert!(test_file.include_only);
     }
 
     #[test]
@@ -324,6 +303,31 @@ include_path = "other.test.toml"
         let msg = err.to_string();
         assert!(msg.contains("invalid step 0"));
         assert!(msg.contains("must have only one of"));
+    }
+
+    #[test]
+    fn parse_step_timeout_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeout.test.toml");
+        fs::write(
+            &path,
+            r#"
+name = "Timeout test"
+
+[[steps]]
+instruction = "Quick step"
+
+[[steps]]
+instruction = "Slow migration"
+step_timeout_secs = 900
+"#,
+        )
+        .unwrap();
+
+        let test_file = parse_test_file(&path).unwrap();
+        assert_eq!(test_file.steps.len(), 2);
+        assert!(test_file.steps[0].step_timeout_secs.is_none());
+        assert_eq!(test_file.steps[1].step_timeout_secs, Some(900));
     }
 
     #[test]

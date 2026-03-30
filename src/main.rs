@@ -197,13 +197,16 @@ fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String]
             }
         };
 
+    // Resolve effective strict_warnings: CLI flag overrides config value
+    let effective_strict_warnings = strict_warnings || effective.provider.strict_warnings.unwrap_or(false);
+
     // From here on, we have a run_id and artifact_dir — always try best-effort reporting.
     let ctx = PipelineContext {
         test_path,
         test_name: &test_name,
         skip_cmds,
         skip_readiness,
-        strict_warnings,
+        strict_warnings: effective_strict_warnings,
         effective: &effective,
         run_id: &run_id,
         session_id: &session_id,
@@ -356,6 +359,7 @@ fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::Ex
         test_name: ctx.test_name,
         test_file: &ctx.test_path.display().to_string(),
         extra_system_prompt: ctx.effective.provider.extra_system_prompt.as_deref(),
+        base_url: ctx.effective.provider.base_url.as_deref(),
     };
     let step_timeout = ctx.effective.provider.step_timeout_secs
         .map(std::time::Duration::from_secs);

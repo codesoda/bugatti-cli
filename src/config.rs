@@ -25,6 +25,10 @@ pub struct ProviderConfig {
     pub agent_args: Vec<String>,
     #[serde(default)]
     pub step_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub strict_warnings: Option<bool>,
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 fn default_provider_name() -> String {
@@ -38,6 +42,8 @@ impl Default for ProviderConfig {
             extra_system_prompt: None,
             agent_args: Vec::new(),
             step_timeout_secs: None,
+            strict_warnings: None,
+            base_url: None,
         }
     }
 }
@@ -78,6 +84,11 @@ impl ProviderConfig {
             step_timeout_secs: overrides
                 .step_timeout_secs
                 .or(self.step_timeout_secs),
+            strict_warnings: self.strict_warnings,
+            base_url: overrides
+                .base_url
+                .clone()
+                .or_else(|| self.base_url.clone()),
         }
     }
 }
@@ -233,18 +244,21 @@ readiness_url = "http://localhost:3000/health"
                 extra_system_prompt: Some("Global prompt".to_string()),
                 agent_args: vec!["--verbose".to_string()],
                 step_timeout_secs: None,
+                strict_warnings: None,
+                base_url: None,
             },
             commands: BTreeMap::new(),
         };
         let test_file = TestFile {
             name: "test".to_string(),
-            include_only: false,
+
             overrides: Some(TestOverrides {
                 provider: Some(ProviderOverrides {
                     name: Some("openai".to_string()),
                     extra_system_prompt: Some("Override prompt".to_string()),
                     agent_args: Some(vec!["--model".to_string(), "gpt-4".to_string()]),
                     step_timeout_secs: None,
+                    base_url: None,
                 }),
             }),
             steps: vec![],
@@ -272,18 +286,21 @@ readiness_url = "http://localhost:3000/health"
                 extra_system_prompt: Some("Global prompt".to_string()),
                 agent_args: vec!["--verbose".to_string()],
                 step_timeout_secs: None,
+                strict_warnings: None,
+                base_url: None,
             },
             commands: BTreeMap::new(),
         };
         let test_file = TestFile {
             name: "test".to_string(),
-            include_only: false,
+
             overrides: Some(TestOverrides {
                 provider: Some(ProviderOverrides {
                     name: Some("openai".to_string()),
                     extra_system_prompt: None,
                     agent_args: None,
                     step_timeout_secs: None,
+                    base_url: None,
                 }),
             }),
             steps: vec![],
@@ -307,17 +324,20 @@ readiness_url = "http://localhost:3000/health"
                 extra_system_prompt: Some("Global prompt".to_string()),
                 agent_args: vec!["--verbose".to_string()],
                 step_timeout_secs: None,
+                strict_warnings: None,
+                base_url: None,
             },
             commands: BTreeMap::new(),
         };
         let test_file = TestFile {
             name: "test".to_string(),
-            include_only: false,
+
             overrides: None,
             steps: vec![Step {
                 instruction: Some("Do something".to_string()),
                 include_path: None,
                 include_glob: None,
+                step_timeout_secs: None,
             }],
         };
 
@@ -330,7 +350,7 @@ readiness_url = "http://localhost:3000/health"
         let global = Config::default();
         let test_file = TestFile {
             name: "test".to_string(),
-            include_only: false,
+
             overrides: Some(TestOverrides { provider: None }),
             steps: vec![],
         };
@@ -366,7 +386,7 @@ step_timeout_secs = 600
         };
         let test_file = TestFile {
             name: "test".to_string(),
-            include_only: false,
+
             overrides: Some(TestOverrides {
                 provider: Some(ProviderOverrides {
                     step_timeout_secs: Some(120),
@@ -391,7 +411,7 @@ step_timeout_secs = 600
         };
         let test_file = TestFile {
             name: "test".to_string(),
-            include_only: false,
+
             overrides: Some(TestOverrides {
                 provider: Some(ProviderOverrides {
                     step_timeout_secs: None,
@@ -403,6 +423,123 @@ step_timeout_secs = 600
 
         let effective = effective_config(&global, &test_file);
         assert_eq!(effective.provider.step_timeout_secs, Some(300));
+    }
+
+    #[test]
+    fn parse_config_with_strict_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("bugatti.config.toml"),
+            r#"
+[provider]
+strict_warnings = true
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(dir.path()).unwrap();
+        assert_eq!(config.provider.strict_warnings, Some(true));
+    }
+
+    #[test]
+    fn merge_preserves_strict_warnings_from_global() {
+        let global = Config {
+            provider: ProviderConfig {
+                strict_warnings: Some(true),
+                ..ProviderConfig::default()
+            },
+            commands: BTreeMap::new(),
+        };
+        let test_file = TestFile {
+            name: "test".to_string(),
+
+            overrides: Some(TestOverrides {
+                provider: Some(ProviderOverrides {
+                    name: Some("openai".to_string()),
+                    ..ProviderOverrides::default()
+                }),
+            }),
+            steps: vec![],
+        };
+
+        let effective = effective_config(&global, &test_file);
+        assert_eq!(effective.provider.strict_warnings, Some(true));
+        assert_eq!(effective.provider.name, "openai");
+    }
+
+    #[test]
+    fn parse_config_with_base_url() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("bugatti.config.toml"),
+            r#"
+[provider]
+base_url = "http://localhost:3000"
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(dir.path()).unwrap();
+        assert_eq!(
+            config.provider.base_url,
+            Some("http://localhost:3000".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_base_url_override() {
+        let global = Config {
+            provider: ProviderConfig {
+                base_url: Some("http://localhost:3000".to_string()),
+                ..ProviderConfig::default()
+            },
+            commands: BTreeMap::new(),
+        };
+        let test_file = TestFile {
+            name: "test".to_string(),
+
+            overrides: Some(TestOverrides {
+                provider: Some(ProviderOverrides {
+                    base_url: Some("http://localhost:5000".to_string()),
+                    ..ProviderOverrides::default()
+                }),
+            }),
+            steps: vec![],
+        };
+
+        let effective = effective_config(&global, &test_file);
+        assert_eq!(
+            effective.provider.base_url,
+            Some("http://localhost:5000".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_base_url_none_preserves_global() {
+        let global = Config {
+            provider: ProviderConfig {
+                base_url: Some("http://localhost:3000".to_string()),
+                ..ProviderConfig::default()
+            },
+            commands: BTreeMap::new(),
+        };
+        let test_file = TestFile {
+            name: "test".to_string(),
+
+            overrides: Some(TestOverrides {
+                provider: Some(ProviderOverrides {
+                    name: Some("openai".to_string()),
+                    ..ProviderOverrides::default()
+                }),
+            }),
+            steps: vec![],
+        };
+
+        let effective = effective_config(&global, &test_file);
+        assert_eq!(
+            effective.provider.base_url,
+            Some("http://localhost:3000".to_string())
+        );
     }
 
     #[test]

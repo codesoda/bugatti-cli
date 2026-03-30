@@ -68,6 +68,8 @@ pub struct EffectiveConfigSummary {
     pub agent_args: Vec<String>,
     pub command_names: Vec<String>,
     pub step_timeout_secs: Option<u64>,
+    pub strict_warnings: Option<bool>,
+    pub base_url: Option<String>,
 }
 
 impl EffectiveConfigSummary {
@@ -78,6 +80,8 @@ impl EffectiveConfigSummary {
             agent_args: config.provider.agent_args.clone(),
             command_names: config.commands.keys().cloned().collect(),
             step_timeout_secs: config.provider.step_timeout_secs,
+            strict_warnings: config.provider.strict_warnings,
+            base_url: config.provider.base_url.clone(),
         }
     }
 }
@@ -225,6 +229,8 @@ mod tests {
                 extra_system_prompt: Some("Be concise".to_string()),
                 agent_args: vec!["--verbose".to_string()],
                 step_timeout_secs: None,
+                strict_warnings: None,
+                base_url: None,
             },
             commands,
         }
