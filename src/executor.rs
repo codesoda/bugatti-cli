@@ -168,20 +168,42 @@ impl From<ProviderError> for ExecutorError {
 
 /// Parse the RESULT contract marker from accumulated output text.
 ///
-/// Scans from the end of the text for the last line matching:
+/// Scans from the end of the text for the last occurrence of a RESULT marker.
+///
+/// Matches:
 ///   RESULT OK
 ///   RESULT WARN: <message>
 ///   RESULT ERROR: <message>
 ///
-/// Free-form text before the result marker is allowed.
+/// The marker can appear on its own line or embedded at the end of a line
+/// (agents sometimes omit the newline before the marker).
 pub fn parse_result_marker(text: &str) -> Option<StepVerdict> {
-    // Scan lines in reverse to find the last RESULT marker
+    // First try line-based scan (most common case)
     for line in text.lines().rev() {
         let trimmed = line.trim();
         if let Some(verdict) = try_parse_result_line(trimmed) {
             return Some(verdict);
         }
     }
+
+    // Fallback: scan for RESULT marker embedded anywhere in text.
+    // Find the last occurrence and parse from there.
+    let mut pos = text.len();
+    while pos > 0 {
+        if let Some(idx) = text[..pos].rfind("RESULT ") {
+            let from_marker = &text[idx..];
+            // Take up to the next newline (or end of string)
+            let end = from_marker.find('\n').unwrap_or(from_marker.len());
+            let candidate = from_marker[..end].trim();
+            if let Some(verdict) = try_parse_result_line(candidate) {
+                return Some(verdict);
+            }
+            pos = idx;
+        } else {
+            break;
+        }
+    }
+
     None
 }
 
@@ -720,6 +742,20 @@ mod tests {
     #[test]
     fn parse_result_whitespace_trimmed() {
         assert_eq!(parse_result_marker("  RESULT OK  "), Some(StepVerdict::Ok));
+    }
+
+    #[test]
+    fn parse_result_embedded_in_line() {
+        // Agent omits newline before RESULT marker
+        let text = "Success message confirmed visible.RESULT OK";
+        assert_eq!(parse_result_marker(text), Some(StepVerdict::Ok));
+    }
+
+    #[test]
+    fn parse_result_embedded_with_duplicate() {
+        // Agent emits RESULT OK twice without newlines
+        let text = "Log line.RESULT OKRESULT OK";
+        assert_eq!(parse_result_marker(text), Some(StepVerdict::Ok));
     }
 
     #[test]

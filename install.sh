@@ -209,15 +209,9 @@ build_from_source() {
         rm "$target_path"
     fi
 
-    # Local checkout → symlink so edits are reflected immediately
-    if [ "$SOURCE_ROOT" = "$(cd "$(dirname "$0")" && pwd)" ]; then
-        ln -s "$built_binary" "$target_path"
-        ok_detail "Symlinked" "$target_path -> $built_binary"
-    else
-        cp "$built_binary" "$target_path"
-        chmod +x "$target_path"
-        ok_detail "Installed" "$target_path"
-    fi
+    cp "$built_binary" "$target_path"
+    chmod +x "$target_path"
+    ok_detail "Installed" "$target_path"
 
     INSTALLED_BINARY="$target_path"
 }

@@ -40,8 +40,6 @@ cd bugatti-cli
 sh install.sh
 ```
 
-Local installs use symlinks so edits to the repo are immediately reflected.
-
 ## Quick Start
 
 Create a test file:
