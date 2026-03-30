@@ -103,6 +103,30 @@ pub fn validate_skip_cmds(config: &Config, skip_cmds: &[String]) -> Result<(), S
     }
 }
 
+/// Validate that all skip-readiness names are known commands that are also in skip-cmds.
+pub fn validate_skip_readiness(
+    config: &Config,
+    skip_cmds: &[String],
+    skip_readiness: &[String],
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for name in skip_readiness {
+        if !config.commands.contains_key(name.as_str()) {
+            errors.push(format!("'{name}' is not a known command"));
+        } else if !skip_cmds.contains(name) {
+            errors.push(format!("'{name}' is not in --skip-cmd (readiness can only be skipped for skipped commands)"));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid --skip-readiness: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
 /// Execute all short-lived commands from the config during the setup phase.
 ///
 /// Commands are executed in BTreeMap order (alphabetical by name).
@@ -231,6 +255,7 @@ pub fn spawn_long_lived_commands(
     config: &Config,
     artifact_dir: &ArtifactDir,
     skip_cmds: &[String],
+    skip_readiness: &[String],
 ) -> Result<Vec<TrackedProcess>, CommandError> {
     let mut tracked = Vec::new();
 
@@ -240,19 +265,23 @@ pub fn spawn_long_lived_commands(
         }
         if skip_cmds.contains(name) {
             println!("SKIP ....... {name} (long-lived)");
-            // Readiness checks still run for skipped commands (user may have it running externally)
+            // Readiness checks still run for skipped commands unless explicitly disabled
             if let Some(ref readiness_url) = def.readiness_url {
-                println!("WAIT ....... {name} (skipped): polling {readiness_url}");
-                if let Err(e) = poll_readiness(readiness_url, DEFAULT_READINESS_TIMEOUT) {
-                    println!("FAIL ....... {name} (skipped): readiness check failed");
-                    teardown_processes(&mut tracked);
-                    return Err(CommandError::ReadinessFailed {
-                        name: name.to_string(),
-                        url: readiness_url.clone(),
-                        message: e,
-                    });
+                if skip_readiness.contains(name) {
+                    println!("SKIP ....... {name} readiness check (--skip-readiness)");
+                } else {
+                    println!("WAIT ....... {name} (skipped): polling {readiness_url}");
+                    if let Err(e) = poll_readiness(readiness_url, DEFAULT_READINESS_TIMEOUT) {
+                        println!("FAIL ....... {name} (skipped): readiness check failed");
+                        teardown_processes(&mut tracked);
+                        return Err(CommandError::ReadinessFailed {
+                            name: name.to_string(),
+                            url: readiness_url.clone(),
+                            message: e,
+                        });
+                    }
+                    println!("READY ...... {name} (skipped)");
                 }
-                println!("READY ...... {name} (skipped)");
             }
             continue;
         }
@@ -642,7 +671,7 @@ mod tests {
             "echo long_lived_output && sleep 60",
         )]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[]).unwrap();
         assert_eq!(tracked.len(), 1);
         assert_eq!(tracked[0].name, "worker");
 
@@ -674,7 +703,7 @@ mod tests {
         ]);
 
         let mut tracked =
-            spawn_long_lived_commands(&config, &artifact_dir, &["server".to_string()]).unwrap();
+            spawn_long_lived_commands(&config, &artifact_dir, &["server".to_string()], &[]).unwrap();
         assert_eq!(tracked.len(), 1);
         assert_eq!(tracked[0].name, "worker");
 
@@ -690,7 +719,7 @@ mod tests {
 
         let config = make_config(vec![("sleeper", CommandKind::LongLived, "sleep 600")]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[]).unwrap();
         assert_eq!(tracked.len(), 1);
 
         let results = teardown_processes(&mut tracked);
@@ -712,7 +741,7 @@ mod tests {
         // Command that exits immediately
         let config = make_config(vec![("quick_exit", CommandKind::LongLived, "exit 1")]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[]).unwrap();
 
         // Wait for it to exit
         std::thread::sleep(Duration::from_millis(200));
@@ -768,6 +797,57 @@ mod tests {
     }
 
     #[test]
+    fn validate_skip_readiness_valid() {
+        let config = make_config(vec![
+            ("server", CommandKind::LongLived, "sleep 60"),
+        ]);
+        assert!(validate_skip_readiness(&config, &["server".to_string()], &["server".to_string()]).is_ok());
+        assert!(validate_skip_readiness(&config, &["server".to_string()], &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_skip_readiness_must_be_skipped() {
+        let config = make_config(vec![
+            ("server", CommandKind::LongLived, "sleep 60"),
+        ]);
+        let err = validate_skip_readiness(&config, &[], &["server".to_string()]).unwrap_err();
+        assert!(err.contains("not in --skip-cmd"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_skip_readiness_unknown_command() {
+        let config = make_config(vec![
+            ("server", CommandKind::LongLived, "sleep 60"),
+        ]);
+        let err = validate_skip_readiness(&config, &["server".to_string()], &["bogus".to_string()]).unwrap_err();
+        assert!(err.contains("not a known command"), "error: {err}");
+    }
+
+    #[test]
+    fn spawn_long_lived_skip_readiness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = RunId("test-run".to_string());
+        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
+        artifact_dir.create_all().unwrap();
+
+        // Readiness URL points to unreachable host — would fail without skip_readiness
+        let config = make_config_with_readiness(vec![
+            ("server", CommandKind::LongLived, "sleep 60", Some("http://127.0.0.1:1/nonexistent")),
+        ]);
+
+        // Skip both the command and its readiness check
+        let tracked = spawn_long_lived_commands(
+            &config,
+            &artifact_dir,
+            &["server".to_string()],
+            &["server".to_string()],
+        ).unwrap();
+
+        // No processes spawned (command was skipped), and no readiness error
+        assert!(tracked.is_empty());
+    }
+
+    #[test]
     fn short_lived_not_spawned_as_long_lived() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
@@ -779,7 +859,7 @@ mod tests {
             ("server", CommandKind::LongLived, "sleep 60"),
         ]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[]).unwrap();
         // Only long-lived should be spawned
         assert_eq!(tracked.len(), 1);
         assert_eq!(tracked[0].name, "server");

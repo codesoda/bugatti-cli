@@ -67,6 +67,7 @@ pub struct EffectiveConfigSummary {
     pub has_extra_system_prompt: bool,
     pub agent_args: Vec<String>,
     pub command_names: Vec<String>,
+    pub step_timeout_secs: Option<u64>,
 }
 
 impl EffectiveConfigSummary {
@@ -76,6 +77,7 @@ impl EffectiveConfigSummary {
             has_extra_system_prompt: config.provider.extra_system_prompt.is_some(),
             agent_args: config.provider.agent_args.clone(),
             command_names: config.commands.keys().cloned().collect(),
+            step_timeout_secs: config.provider.step_timeout_secs,
         }
     }
 }
@@ -222,6 +224,7 @@ mod tests {
                 name: "claude-code".to_string(),
                 extra_system_prompt: Some("Be concise".to_string()),
                 agent_args: vec!["--verbose".to_string()],
+                step_timeout_secs: None,
             },
             commands,
         }

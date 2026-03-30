@@ -326,6 +326,7 @@ mod tests {
             has_extra_system_prompt: true,
             agent_args: vec!["--verbose".to_string()],
             command_names: vec!["migrate".to_string(), "server".to_string()],
+            step_timeout_secs: None,
         }
     }
 

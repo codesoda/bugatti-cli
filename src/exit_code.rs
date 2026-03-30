@@ -29,7 +29,7 @@ pub const EXIT_TIMEOUT: i32 = 4;
 /// Run was interrupted (Ctrl+C / SIGINT).
 pub const EXIT_INTERRUPTED: i32 = 5;
 
-use crate::executor::{RunOutcome, StepResult};
+use crate::executor::{RunOutcome, StepResult, StepVerdict};
 
 /// Compute the exit code for a single completed run.
 ///
@@ -55,6 +55,27 @@ pub fn exit_code_for_run(outcome: &RunOutcome) -> i32 {
 
     if has_timeout {
         EXIT_TIMEOUT
+    } else {
+        EXIT_STEP_ERROR
+    }
+}
+
+/// Compute the exit code for a run, optionally treating WARN as failure.
+///
+/// When `strict_warnings` is true, any WARN verdict produces EXIT_STEP_ERROR
+/// instead of EXIT_OK.
+pub fn exit_code_for_run_strict(outcome: &RunOutcome, strict_warnings: bool) -> i32 {
+    if !strict_warnings {
+        return exit_code_for_run(outcome);
+    }
+    // With strict warnings: only pure OK is passing
+    let has_timeout = outcome.steps.iter().any(|s| matches!(&s.result, StepResult::Timeout));
+    if has_timeout {
+        return EXIT_TIMEOUT;
+    }
+    let all_ok = outcome.steps.iter().all(|s| matches!(&s.result, StepResult::Verdict(StepVerdict::Ok)));
+    if all_ok {
+        EXIT_OK
     } else {
         EXIT_STEP_ERROR
     }
@@ -184,6 +205,33 @@ mod tests {
     #[test]
     fn aggregate_parse_errors_with_worse_run() {
         assert_eq!(aggregate_exit_code(&[4], true), EXIT_TIMEOUT);
+    }
+
+    #[test]
+    fn exit_code_strict_warns_fail() {
+        let outcome = make_outcome(vec![
+            StepResult::Verdict(StepVerdict::Ok),
+            StepResult::Verdict(StepVerdict::Warn("slow".to_string())),
+        ]);
+        assert_eq!(exit_code_for_run_strict(&outcome, true), EXIT_STEP_ERROR);
+    }
+
+    #[test]
+    fn exit_code_strict_ok_still_passes() {
+        let outcome = make_outcome(vec![
+            StepResult::Verdict(StepVerdict::Ok),
+            StepResult::Verdict(StepVerdict::Ok),
+        ]);
+        assert_eq!(exit_code_for_run_strict(&outcome, true), EXIT_OK);
+    }
+
+    #[test]
+    fn exit_code_strict_false_preserves_existing() {
+        let outcome = make_outcome(vec![
+            StepResult::Verdict(StepVerdict::Ok),
+            StepResult::Verdict(StepVerdict::Warn("slow".to_string())),
+        ]);
+        assert_eq!(exit_code_for_run_strict(&outcome, false), EXIT_OK);
     }
 
     #[test]

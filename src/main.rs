@@ -60,7 +60,7 @@ fn main() {
     let cli = Cli::parse();
 
     let code = match cli.command {
-        Commands::Test { path, skip_cmds } => {
+        Commands::Test { path, skip_cmds, skip_readiness, strict_warnings } => {
             let project_root = std::env::current_dir().unwrap_or_else(|e| {
                 eprintln!("ERROR: failed to determine current directory: {e}");
                 std::process::exit(EXIT_CONFIG_ERROR);
@@ -76,7 +76,7 @@ fn main() {
                         eprintln!("ERROR: test file not found: {p}");
                         EXIT_CONFIG_ERROR
                     } else {
-                        let result = run_test_pipeline(&project_root, &test_path, &skip_cmds);
+                        let result = run_test_pipeline(&project_root, &test_path, &skip_cmds, &skip_readiness, strict_warnings);
                         // Print run reference for single-file mode
                         if let Some(run_id) = &result.run_id {
                             println!("\nRun ID: {run_id}");
@@ -92,7 +92,7 @@ fn main() {
                         result.exit_code
                     }
                 }
-                None => run_discovery(&project_root, &skip_cmds),
+                None => run_discovery(&project_root, &skip_cmds, &skip_readiness, strict_warnings),
             }
         }
     };
@@ -104,7 +104,7 @@ fn main() {
 ///
 /// Pipeline order: config load -> parse -> expand -> artifact setup -> command setup
 /// -> provider init -> step execution -> report -> teardown -> exit
-fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String]) -> TestRunResult {
+fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool) -> TestRunResult {
     let test_name_fallback = test_path.display().to_string();
 
     // Phase 1: Load config
@@ -154,6 +154,18 @@ fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String]
         };
     }
 
+    // Phase 4b: Validate skip-readiness
+    if let Err(msg) = command::validate_skip_readiness(&effective, skip_cmds, skip_readiness) {
+        return TestRunResult {
+            path: test_path.to_path_buf(),
+            name: test_name,
+            exit_code: EXIT_CONFIG_ERROR,
+            run_id: None,
+            report_path: None,
+            error: Some(msg),
+        };
+    }
+
     // Phase 5: Expand include steps
     let steps = match expand::expand_steps(test_path, &test_file) {
         Ok(s) => s,
@@ -186,38 +198,102 @@ fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String]
         };
 
     // From here on, we have a run_id and artifact_dir — always try best-effort reporting.
-    run_test_with_artifacts(
-        project_root,
+    let ctx = PipelineContext {
         test_path,
-        &test_name,
+        test_name: &test_name,
         skip_cmds,
-        &effective,
-        steps,
-        run_id,
-        session_id,
-        artifact_dir,
-    )
+        skip_readiness,
+        strict_warnings,
+        effective: &effective,
+        run_id: &run_id,
+        session_id: &session_id,
+        artifact_dir: &artifact_dir,
+        config_summary: EffectiveConfigSummary::from_config(&effective),
+        start_time: chrono::Utc::now(),
+    };
+    run_test_with_artifacts(&ctx, steps)
+}
+
+/// State shared across the pipeline after artifact setup.
+struct PipelineContext<'a> {
+    test_path: &'a Path,
+    test_name: &'a str,
+    skip_cmds: &'a [String],
+    skip_readiness: &'a [String],
+    strict_warnings: bool,
+    effective: &'a bugatti::config::Config,
+    run_id: &'a bugatti::run::RunId,
+    session_id: &'a bugatti::run::SessionId,
+    artifact_dir: &'a ArtifactDir,
+    config_summary: EffectiveConfigSummary,
+    start_time: chrono::DateTime<chrono::Utc>,
+}
+
+impl<'a> PipelineContext<'a> {
+    /// Build a TestRunResult for a pre-execution failure, writing a best-effort report.
+    fn fail_early(
+        &self,
+        exit_code: i32,
+        error: String,
+        tracked: &mut [TrackedProcess],
+    ) -> TestRunResult {
+        command::teardown_processes(tracked);
+        let end_time = chrono::Utc::now();
+        let empty_outcome = executor::RunOutcome {
+            steps: vec![],
+            all_passed: false,
+            total_duration: std::time::Duration::ZERO,
+            artifact_errors: vec![],
+        };
+        let _ = self.write_report(&empty_outcome, &end_time);
+        TestRunResult {
+            path: self.test_path.to_path_buf(),
+            name: self.test_name.to_string(),
+            exit_code,
+            run_id: Some(self.run_id.0.clone()),
+            report_path: Some(report::report_path(self.artifact_dir).display().to_string()),
+            error: Some(error),
+        }
+    }
+
+    /// Write a best-effort report for the given outcome.
+    fn write_report(
+        &self,
+        outcome: &executor::RunOutcome,
+        end_time: &chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), report::ReportError> {
+        let input = ReportInput {
+            run_id: self.run_id,
+            session_id: self.session_id,
+            root_test_file: &self.test_path.display().to_string(),
+            provider_name: &self.effective.provider.name,
+            start_time: &self.start_time.to_rfc3339(),
+            end_time: &end_time.to_rfc3339(),
+            skipped_commands: self.skip_cmds,
+            config_summary: &self.config_summary,
+            outcome,
+            artifact_dir: self.artifact_dir,
+            artifact_errors: &outcome.artifact_errors,
+        };
+        match report::write_report(&input, self.artifact_dir) {
+            Ok(()) => {
+                tracing::info!("report written successfully");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to write report");
+                eprintln!("WARNING: failed to write report: {e}");
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Continue the pipeline after artifact setup. Ensures best-effort report writing
 /// and subprocess teardown even on failure.
-#[allow(clippy::too_many_arguments)]
-fn run_test_with_artifacts(
-    _project_root: &Path,
-    test_path: &Path,
-    test_name: &str,
-    skip_cmds: &[String],
-    effective: &bugatti::config::Config,
-    steps: Vec<bugatti::expand::ExpandedStep>,
-    run_id: bugatti::run::RunId,
-    session_id: bugatti::run::SessionId,
-    artifact_dir: ArtifactDir,
-) -> TestRunResult {
-    let start_time = chrono::Utc::now();
-    let config_summary = EffectiveConfigSummary::from_config(effective);
-
+fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::ExpandedStep>) -> TestRunResult {
     // Phase 7: Initialize tracing
-    let _tracing_guard = match diagnostics::init_tracing(&artifact_dir) {
+    let _tracing_guard = match diagnostics::init_tracing(ctx.artifact_dir) {
         Ok(g) => Some(g),
         Err(e) => {
             eprintln!("WARNING: failed to initialize tracing: {e}");
@@ -226,228 +302,78 @@ fn run_test_with_artifacts(
     };
 
     tracing::info!(
-        run_id = %run_id,
-        test_file = %test_path.display(),
+        run_id = %ctx.run_id,
+        test_file = %ctx.test_path.display(),
         "starting test pipeline"
     );
 
+    let mut no_processes = vec![];
+
     // Phase 8: Run short-lived setup commands
-    if let Err(e) = command::run_short_lived_commands(effective, &artifact_dir, skip_cmds) {
+    if let Err(e) = command::run_short_lived_commands(ctx.effective, ctx.artifact_dir, ctx.skip_cmds) {
         tracing::error!(error = %e, "short-lived command failed");
-        let end_time = chrono::Utc::now();
-        // Best-effort report for command failure
-        let empty_outcome = executor::RunOutcome {
-            steps: vec![],
-            all_passed: false,
-            total_duration: std::time::Duration::ZERO,
-            artifact_errors: vec![],
-        };
-        let _ = write_best_effort_report(
-            &run_id,
-            &session_id,
-            test_path,
-            effective,
-            skip_cmds,
-            &config_summary,
-            &empty_outcome,
-            &artifact_dir,
-            &start_time,
-            &end_time,
-        );
-        return TestRunResult {
-            path: test_path.to_path_buf(),
-            name: test_name.to_string(),
-            exit_code: EXIT_CONFIG_ERROR,
-            run_id: Some(run_id.0.clone()),
-            report_path: Some(report::report_path(&artifact_dir).display().to_string()),
-            error: Some(format!("setup command failed: {e}")),
-        };
+        return ctx.fail_early(EXIT_CONFIG_ERROR, format!("setup command failed: {e}"), &mut no_processes);
     }
 
     // Phase 9: Spawn long-lived commands
     let mut tracked_processes: Vec<TrackedProcess> =
-        match command::spawn_long_lived_commands(effective, &artifact_dir, skip_cmds) {
+        match command::spawn_long_lived_commands(ctx.effective, ctx.artifact_dir, ctx.skip_cmds, ctx.skip_readiness) {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(error = %e, "long-lived command failed");
-                let end_time = chrono::Utc::now();
-                let empty_outcome = executor::RunOutcome {
-                    steps: vec![],
-                    all_passed: false,
-                    total_duration: std::time::Duration::ZERO,
-                    artifact_errors: vec![],
-                };
-                let _ = write_best_effort_report(
-                    &run_id,
-                    &session_id,
-                    test_path,
-                    effective,
-                    skip_cmds,
-                    &config_summary,
-                    &empty_outcome,
-                    &artifact_dir,
-                    &start_time,
-                    &end_time,
-                );
-                return TestRunResult {
-                    path: test_path.to_path_buf(),
-                    name: test_name.to_string(),
-                    exit_code: EXIT_PROVIDER_ERROR,
-                    run_id: Some(run_id.0.clone()),
-                    report_path: Some(report::report_path(&artifact_dir).display().to_string()),
-                    error: Some(format!("long-lived command failed: {e}")),
-                };
+                return ctx.fail_early(EXIT_PROVIDER_ERROR, format!("long-lived command failed: {e}"), &mut no_processes);
             }
         };
 
     // Phase 10: Initialize provider session
-    let mut session = match ClaudeCodeAdapter::initialize(effective, &artifact_dir.root) {
+    let mut session = match ClaudeCodeAdapter::initialize(ctx.effective, &ctx.artifact_dir.root) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "provider initialization failed");
-            command::teardown_processes(&mut tracked_processes);
-            let end_time = chrono::Utc::now();
-            let empty_outcome = executor::RunOutcome {
-                steps: vec![],
-                all_passed: false,
-                total_duration: std::time::Duration::ZERO,
-                artifact_errors: vec![],
-            };
-            let _ = write_best_effort_report(
-                &run_id,
-                &session_id,
-                test_path,
-                effective,
-                skip_cmds,
-                &config_summary,
-                &empty_outcome,
-                &artifact_dir,
-                &start_time,
-                &end_time,
-            );
-            return TestRunResult {
-                path: test_path.to_path_buf(),
-                name: test_name.to_string(),
-                exit_code: EXIT_PROVIDER_ERROR,
-                run_id: Some(run_id.0.clone()),
-                report_path: Some(report::report_path(&artifact_dir).display().to_string()),
-                error: Some(format!("provider initialization failed: {e}")),
-            };
+            return ctx.fail_early(EXIT_PROVIDER_ERROR, format!("provider initialization failed: {e}"), &mut tracked_processes);
         }
     };
 
     if let Err(e) = session.start() {
         tracing::error!(error = %e, "provider start failed");
-        command::teardown_processes(&mut tracked_processes);
-        let end_time = chrono::Utc::now();
-        let empty_outcome = executor::RunOutcome {
-            steps: vec![],
-            all_passed: false,
-            total_duration: std::time::Duration::ZERO,
-            artifact_errors: vec![],
-        };
-        let _ = write_best_effort_report(
-            &run_id,
-            &session_id,
-            test_path,
-            effective,
-            skip_cmds,
-            &config_summary,
-            &empty_outcome,
-            &artifact_dir,
-            &start_time,
-            &end_time,
-        );
-        return TestRunResult {
-            path: test_path.to_path_buf(),
-            name: test_name.to_string(),
-            exit_code: EXIT_PROVIDER_ERROR,
-            run_id: Some(run_id.0.clone()),
-            report_path: Some(report::report_path(&artifact_dir).display().to_string()),
-            error: Some(format!("provider start failed: {e}")),
-        };
+        return ctx.fail_early(EXIT_PROVIDER_ERROR, format!("provider start failed: {e}"), &mut tracked_processes);
     }
 
     // Phase 11: Check for unexpected exits before step execution
     if let Some((name, code)) = command::check_for_unexpected_exits(&mut tracked_processes) {
         tracing::error!(command = %name, exit_code = ?code, "long-lived process exited unexpectedly");
         let _ = session.close();
-        command::teardown_processes(&mut tracked_processes);
-        let end_time = chrono::Utc::now();
-        let empty_outcome = executor::RunOutcome {
-            steps: vec![],
-            all_passed: false,
-            total_duration: std::time::Duration::ZERO,
-            artifact_errors: vec![],
-        };
-        let _ = write_best_effort_report(
-            &run_id,
-            &session_id,
-            test_path,
-            effective,
-            skip_cmds,
-            &config_summary,
-            &empty_outcome,
-            &artifact_dir,
-            &start_time,
-            &end_time,
+        let code_str = code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string());
+        return ctx.fail_early(
+            EXIT_PROVIDER_ERROR,
+            format!("long-lived process '{name}' exited unexpectedly (code: {code_str})"),
+            &mut tracked_processes,
         );
-        let code_str = code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        return TestRunResult {
-            path: test_path.to_path_buf(),
-            name: test_name.to_string(),
-            exit_code: EXIT_PROVIDER_ERROR,
-            run_id: Some(run_id.0.clone()),
-            report_path: Some(report::report_path(&artifact_dir).display().to_string()),
-            error: Some(format!(
-                "long-lived process '{name}' exited unexpectedly (code: {code_str})"
-            )),
-        };
     }
 
     // Phase 12: Execute steps
+    let bootstrap = executor::BootstrapConfig {
+        test_name: ctx.test_name,
+        test_file: &ctx.test_path.display().to_string(),
+        extra_system_prompt: ctx.effective.provider.extra_system_prompt.as_deref(),
+    };
+    let step_timeout = ctx.effective.provider.step_timeout_secs
+        .map(std::time::Duration::from_secs);
     let outcome = match executor::execute_steps(
         &mut session,
         &steps,
-        &run_id,
-        &session_id,
-        &artifact_dir,
-        None,
+        ctx.run_id,
+        ctx.session_id,
+        ctx.artifact_dir,
+        step_timeout,
+        Some(&bootstrap),
+        &INTERRUPTED,
     ) {
         Ok(outcome) => outcome,
         Err(e) => {
             tracing::error!(error = %e, "step execution failed");
             let _ = session.close();
-            command::teardown_processes(&mut tracked_processes);
-            let end_time = chrono::Utc::now();
-            let empty_outcome = executor::RunOutcome {
-                steps: vec![],
-                all_passed: false,
-                total_duration: std::time::Duration::ZERO,
-                artifact_errors: vec![],
-            };
-            let _ = write_best_effort_report(
-                &run_id,
-                &session_id,
-                test_path,
-                effective,
-                skip_cmds,
-                &config_summary,
-                &empty_outcome,
-                &artifact_dir,
-                &start_time,
-                &end_time,
-            );
-            return TestRunResult {
-                path: test_path.to_path_buf(),
-                name: test_name.to_string(),
-                exit_code: EXIT_STEP_ERROR,
-                run_id: Some(run_id.0.clone()),
-                report_path: Some(report::report_path(&artifact_dir).display().to_string()),
-                error: Some(format!("execution error: {e}")),
-            };
+            return ctx.fail_early(EXIT_STEP_ERROR, format!("execution error: {e}"), &mut tracked_processes);
         }
     };
 
@@ -466,81 +392,30 @@ fn run_test_with_artifacts(
 
     // Phase 15: Write report
     let end_time = chrono::Utc::now();
-    let exit_code = exit_code::exit_code_for_run(&outcome);
+    let exit_code = exit_code::exit_code_for_run_strict(&outcome, ctx.strict_warnings);
 
-    let _ = write_best_effort_report(
-        &run_id,
-        &session_id,
-        test_path,
-        effective,
-        skip_cmds,
-        &config_summary,
-        &outcome,
-        &artifact_dir,
-        &start_time,
-        &end_time,
-    );
+    let _ = ctx.write_report(&outcome, &end_time);
 
     tracing::info!(
-        run_id = %run_id,
+        run_id = %ctx.run_id,
         exit_code = exit_code,
         all_passed = outcome.all_passed,
         "test pipeline complete"
     );
 
     TestRunResult {
-        path: test_path.to_path_buf(),
-        name: test_name.to_string(),
+        path: ctx.test_path.to_path_buf(),
+        name: ctx.test_name.to_string(),
         exit_code,
-        run_id: Some(run_id.0.clone()),
-        report_path: Some(report::report_path(&artifact_dir).display().to_string()),
+        run_id: Some(ctx.run_id.0.clone()),
+        report_path: Some(report::report_path(ctx.artifact_dir).display().to_string()),
         error: None,
-    }
-}
-
-/// Write a report, logging but not propagating errors.
-#[allow(clippy::too_many_arguments)]
-fn write_best_effort_report(
-    run_id: &bugatti::run::RunId,
-    session_id: &bugatti::run::SessionId,
-    test_path: &Path,
-    effective: &bugatti::config::Config,
-    skip_cmds: &[String],
-    config_summary: &EffectiveConfigSummary,
-    outcome: &executor::RunOutcome,
-    artifact_dir: &ArtifactDir,
-    start_time: &chrono::DateTime<chrono::Utc>,
-    end_time: &chrono::DateTime<chrono::Utc>,
-) -> Result<(), report::ReportError> {
-    let input = ReportInput {
-        run_id,
-        session_id,
-        root_test_file: &test_path.display().to_string(),
-        provider_name: &effective.provider.name,
-        start_time: &start_time.to_rfc3339(),
-        end_time: &end_time.to_rfc3339(),
-        skipped_commands: skip_cmds,
-        config_summary,
-        outcome,
-        artifact_dir,
-        artifact_errors: &outcome.artifact_errors,
-    };
-    match report::write_report(&input, artifact_dir) {
-        Ok(()) => {
-            tracing::info!("report written successfully");
-            Ok(())
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to write report");
-            eprintln!("WARNING: failed to write report: {e}");
-            Err(e)
-        }
     }
 }
 
 /// Discover and run all root test files, printing an aggregate summary.
 /// Returns the aggregate exit code.
-fn run_discovery(project_root: &Path, skip_cmds: &[String]) -> i32 {
+fn run_discovery(project_root: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool) -> i32 {
     println!("Discovering root test files...");
 
     let discovery = match discover_root_tests(project_root) {
@@ -590,7 +465,7 @@ fn run_discovery(project_root: &Path, skip_cmds: &[String]) -> i32 {
             });
             continue;
         }
-        let result = run_single_test(test, project_root, skip_cmds);
+        let result = run_single_test(test, project_root, skip_cmds, skip_readiness, strict_warnings);
         results.push(result);
     }
 
@@ -620,12 +495,14 @@ fn run_single_test(
     test: &DiscoveredTest,
     project_root: &Path,
     skip_cmds: &[String],
+    skip_readiness: &[String],
+    strict_warnings: bool,
 ) -> TestRunResult {
     println!("═══════════════════════════════════════════════════════");
     println!("Running: {} ({})", test.name, test.path.display());
     println!("═══════════════════════════════════════════════════════");
 
-    let result = run_test_pipeline(project_root, &test.path, skip_cmds);
+    let result = run_test_pipeline(project_root, &test.path, skip_cmds, skip_readiness, strict_warnings);
 
     if let Some(err) = &result.error {
         eprintln!("  ERROR: {err}");
@@ -719,7 +596,7 @@ mod tests {
     fn test_subcommand_no_path() {
         let cli = Cli::parse_from(["bugatti", "test"]);
         match cli.command {
-            bugatti::cli::Commands::Test { path, skip_cmds } => {
+            bugatti::cli::Commands::Test { path, skip_cmds, .. } => {
                 assert!(path.is_none());
                 assert!(skip_cmds.is_empty());
             }
@@ -730,7 +607,7 @@ mod tests {
     fn test_subcommand_with_path() {
         let cli = Cli::parse_from(["bugatti", "test", "some/path.test.toml"]);
         match cli.command {
-            bugatti::cli::Commands::Test { path, skip_cmds } => {
+            bugatti::cli::Commands::Test { path, skip_cmds, .. } => {
                 assert_eq!(path.unwrap(), "some/path.test.toml");
                 assert!(skip_cmds.is_empty());
             }
@@ -741,7 +618,7 @@ mod tests {
     fn test_subcommand_with_skip_cmd() {
         let cli = Cli::parse_from(["bugatti", "test", "--skip-cmd", "migrate"]);
         match cli.command {
-            bugatti::cli::Commands::Test { path, skip_cmds } => {
+            bugatti::cli::Commands::Test { path, skip_cmds, .. } => {
                 assert!(path.is_none());
                 assert_eq!(skip_cmds, vec!["migrate".to_string()]);
             }
@@ -760,9 +637,34 @@ mod tests {
             "server",
         ]);
         match cli.command {
-            bugatti::cli::Commands::Test { path, skip_cmds } => {
+            bugatti::cli::Commands::Test { path, skip_cmds, .. } => {
                 assert_eq!(path.unwrap(), "my.test.toml");
                 assert_eq!(skip_cmds, vec!["migrate".to_string(), "server".to_string()]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_subcommand_with_skip_readiness() {
+        let cli = Cli::parse_from([
+            "bugatti", "test",
+            "--skip-cmd", "server",
+            "--skip-readiness", "server",
+        ]);
+        match cli.command {
+            bugatti::cli::Commands::Test { skip_cmds, skip_readiness, .. } => {
+                assert_eq!(skip_cmds, vec!["server".to_string()]);
+                assert_eq!(skip_readiness, vec!["server".to_string()]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_subcommand_with_strict_warnings() {
+        let cli = Cli::parse_from(["bugatti", "test", "--strict-warnings"]);
+        match cli.command {
+            bugatti::cli::Commands::Test { strict_warnings, .. } => {
+                assert!(strict_warnings);
             }
         }
     }

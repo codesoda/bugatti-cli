@@ -23,6 +23,8 @@ pub struct ProviderConfig {
     pub extra_system_prompt: Option<String>,
     #[serde(default)]
     pub agent_args: Vec<String>,
+    #[serde(default)]
+    pub step_timeout_secs: Option<u64>,
 }
 
 fn default_provider_name() -> String {
@@ -35,6 +37,7 @@ impl Default for ProviderConfig {
             name: default_provider_name(),
             extra_system_prompt: None,
             agent_args: Vec::new(),
+            step_timeout_secs: None,
         }
     }
 }
@@ -72,6 +75,9 @@ impl ProviderConfig {
                 .agent_args
                 .clone()
                 .unwrap_or_else(|| self.agent_args.clone()),
+            step_timeout_secs: overrides
+                .step_timeout_secs
+                .or(self.step_timeout_secs),
         }
     }
 }
@@ -226,6 +232,7 @@ readiness_url = "http://localhost:3000/health"
                 name: "claude-code".to_string(),
                 extra_system_prompt: Some("Global prompt".to_string()),
                 agent_args: vec!["--verbose".to_string()],
+                step_timeout_secs: None,
             },
             commands: BTreeMap::new(),
         };
@@ -237,6 +244,7 @@ readiness_url = "http://localhost:3000/health"
                     name: Some("openai".to_string()),
                     extra_system_prompt: Some("Override prompt".to_string()),
                     agent_args: Some(vec!["--model".to_string(), "gpt-4".to_string()]),
+                    step_timeout_secs: None,
                 }),
             }),
             steps: vec![],
@@ -263,6 +271,7 @@ readiness_url = "http://localhost:3000/health"
                 name: "claude-code".to_string(),
                 extra_system_prompt: Some("Global prompt".to_string()),
                 agent_args: vec!["--verbose".to_string()],
+                step_timeout_secs: None,
             },
             commands: BTreeMap::new(),
         };
@@ -274,6 +283,7 @@ readiness_url = "http://localhost:3000/health"
                     name: Some("openai".to_string()),
                     extra_system_prompt: None,
                     agent_args: None,
+                    step_timeout_secs: None,
                 }),
             }),
             steps: vec![],
@@ -296,6 +306,7 @@ readiness_url = "http://localhost:3000/health"
                 name: "claude-code".to_string(),
                 extra_system_prompt: Some("Global prompt".to_string()),
                 agent_args: vec!["--verbose".to_string()],
+                step_timeout_secs: None,
             },
             commands: BTreeMap::new(),
         };
@@ -326,6 +337,72 @@ readiness_url = "http://localhost:3000/health"
 
         let effective = effective_config(&global, &test_file);
         assert_eq!(effective.provider, global.provider);
+    }
+
+    #[test]
+    fn parse_config_with_step_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("bugatti.config.toml"),
+            r#"
+[provider]
+step_timeout_secs = 600
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(dir.path()).unwrap();
+        assert_eq!(config.provider.step_timeout_secs, Some(600));
+    }
+
+    #[test]
+    fn merge_timeout_override() {
+        let global = Config {
+            provider: ProviderConfig {
+                step_timeout_secs: Some(300),
+                ..ProviderConfig::default()
+            },
+            commands: BTreeMap::new(),
+        };
+        let test_file = TestFile {
+            name: "test".to_string(),
+            include_only: false,
+            overrides: Some(TestOverrides {
+                provider: Some(ProviderOverrides {
+                    step_timeout_secs: Some(120),
+                    ..ProviderOverrides::default()
+                }),
+            }),
+            steps: vec![],
+        };
+
+        let effective = effective_config(&global, &test_file);
+        assert_eq!(effective.provider.step_timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn merge_timeout_none_preserves_global() {
+        let global = Config {
+            provider: ProviderConfig {
+                step_timeout_secs: Some(300),
+                ..ProviderConfig::default()
+            },
+            commands: BTreeMap::new(),
+        };
+        let test_file = TestFile {
+            name: "test".to_string(),
+            include_only: false,
+            overrides: Some(TestOverrides {
+                provider: Some(ProviderOverrides {
+                    step_timeout_secs: None,
+                    ..ProviderOverrides::default()
+                }),
+            }),
+            steps: vec![],
+        };
+
+        let effective = effective_config(&global, &test_file);
+        assert_eq!(effective.provider.step_timeout_secs, Some(300));
     }
 
     #[test]

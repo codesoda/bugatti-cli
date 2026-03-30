@@ -33,6 +33,7 @@ pub struct ProviderOverrides {
     pub name: Option<String>,
     pub extra_system_prompt: Option<String>,
     pub agent_args: Option<Vec<String>>,
+    pub step_timeout_secs: Option<u64>,
 }
 
 /// A single step in a test file — either an instruction or an include.

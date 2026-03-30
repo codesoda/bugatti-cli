@@ -18,13 +18,22 @@ pub struct ClaudeCodeAdapter {
     session_id: String,
     /// Extra agent arguments from config.
     agent_args: Vec<String>,
-    /// Extra system prompt from config.
-    extra_system_prompt: Option<String>,
     /// Artifact directory for transcript storage (used in future stories for transcript capture).
     #[allow(dead_code)]
     artifact_dir: PathBuf,
     /// Whether the session has been started.
     started: bool,
+}
+
+/// Format a step message with metadata prefix for sending to the provider.
+pub(crate) fn format_step_message(message: &StepMessage) -> String {
+    format!(
+        "[run_id={} session_id={} step={}/{} source={}]\n\n{}",
+        message.run_id, message.session_id,
+        message.step_id + 1, message.total_steps,
+        message.source_file,
+        message.instruction
+    )
 }
 
 /// A single event from the Claude Code CLI stream-json output.
@@ -55,10 +64,6 @@ impl ClaudeCodeAdapter {
             .arg(&self.session_id)
             .arg("--output-format")
             .arg("stream-json");
-
-        if let Some(ref prompt) = self.extra_system_prompt {
-            cmd.arg("--system-prompt").arg(prompt);
-        }
 
         for arg in &self.agent_args {
             cmd.arg(arg);
@@ -105,7 +110,6 @@ impl AgentSession for ClaudeCodeAdapter {
             binary_path,
             session_id,
             agent_args: config.provider.agent_args.clone(),
-            extra_system_prompt: config.provider.extra_system_prompt.clone(),
             artifact_dir: artifact_dir.to_path_buf(),
             started: false,
         })
@@ -130,7 +134,8 @@ impl AgentSession for ClaudeCodeAdapter {
         message: StepMessage,
     ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
     {
-        self.send_message(&message.instruction)
+        let formatted = format_step_message(&message);
+        self.send_message(&formatted)
     }
 
     fn close(&mut self) -> Result<(), ProviderError> {
@@ -269,6 +274,7 @@ mod tests {
                 name: "claude-code".to_string(),
                 extra_system_prompt: Some("Be concise".to_string()),
                 agent_args: vec!["--verbose".to_string()],
+                step_timeout_secs: None,
             },
             commands: BTreeMap::new(),
         }
@@ -280,7 +286,6 @@ mod tests {
             binary_path: PathBuf::from("/usr/bin/claude"),
             session_id: "test-session-123".to_string(),
             agent_args: vec![],
-            extra_system_prompt: None,
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: true,
         };
@@ -298,30 +303,11 @@ mod tests {
     }
 
     #[test]
-    fn build_command_includes_system_prompt_when_configured() {
-        let adapter = ClaudeCodeAdapter {
-            binary_path: PathBuf::from("/usr/bin/claude"),
-            session_id: "test-session".to_string(),
-            agent_args: vec![],
-            extra_system_prompt: Some("Be concise".to_string()),
-            artifact_dir: PathBuf::from("/tmp/artifacts"),
-            started: true,
-        };
-
-        let cmd = adapter.build_command("test");
-        let args: Vec<_> = cmd.get_args().collect();
-
-        assert!(args.contains(&std::ffi::OsStr::new("--system-prompt")));
-        assert!(args.contains(&std::ffi::OsStr::new("Be concise")));
-    }
-
-    #[test]
     fn build_command_includes_agent_args() {
         let adapter = ClaudeCodeAdapter {
             binary_path: PathBuf::from("/usr/bin/claude"),
             session_id: "test-session".to_string(),
             agent_args: vec!["--model".to_string(), "opus".to_string()],
-            extra_system_prompt: None,
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: true,
         };
@@ -334,12 +320,11 @@ mod tests {
     }
 
     #[test]
-    fn build_command_omits_system_prompt_when_none() {
+    fn build_command_never_includes_system_prompt() {
         let adapter = ClaudeCodeAdapter {
             binary_path: PathBuf::from("/usr/bin/claude"),
             session_id: "test-session".to_string(),
             agent_args: vec![],
-            extra_system_prompt: None,
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: true,
         };
@@ -347,6 +332,7 @@ mod tests {
         let cmd = adapter.build_command("test");
         let args: Vec<_> = cmd.get_args().collect();
 
+        // System prompt now goes through bootstrap message, not CLI flag
         assert!(!args.contains(&std::ffi::OsStr::new("--system-prompt")));
     }
 
@@ -356,7 +342,6 @@ mod tests {
             binary_path: PathBuf::from("/usr/bin/claude"),
             session_id: "test-session".to_string(),
             agent_args: vec![],
-            extra_system_prompt: None,
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: false,
         };
@@ -377,7 +362,6 @@ mod tests {
             binary_path: PathBuf::from("/usr/bin/claude"),
             session_id: "test-session".to_string(),
             agent_args: vec![],
-            extra_system_prompt: None,
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: true,
         };
@@ -516,7 +500,6 @@ mod tests {
             Ok(adapter) => {
                 assert!(!adapter.started);
                 assert_eq!(adapter.agent_args, vec!["--verbose"]);
-                assert_eq!(adapter.extra_system_prompt, Some("Be concise".to_string()));
             }
             Err(ProviderError::InitializationFailed(msg)) => {
                 assert!(msg.contains("claude CLI binary not found"));
@@ -531,7 +514,6 @@ mod tests {
             binary_path: PathBuf::from("/usr/bin/claude"),
             session_id: "test-session".to_string(),
             agent_args: vec![],
-            extra_system_prompt: None,
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: false,
         };
@@ -539,5 +521,30 @@ mod tests {
         assert!(!adapter.started);
         adapter.start().unwrap();
         assert!(adapter.started);
+    }
+
+    #[test]
+    fn format_step_message_includes_metadata() {
+        use crate::run::{RunId, SessionId};
+
+        let msg = StepMessage {
+            run_id: RunId("run-abc".to_string()),
+            session_id: SessionId("sess-xyz".to_string()),
+            step_id: 2,
+            total_steps: 5,
+            source_file: "tests/login.test.toml".to_string(),
+            instruction: "Check the login page".to_string(),
+        };
+        let formatted = format_step_message(&msg);
+
+        assert!(formatted.contains("run_id=run-abc"));
+        assert!(formatted.contains("session_id=sess-xyz"));
+        assert!(formatted.contains("step=3/5"));
+        assert!(formatted.contains("source=tests/login.test.toml"));
+        assert!(formatted.contains("Check the login page"));
+        // Metadata comes before instruction
+        let meta_pos = formatted.find("[run_id=").unwrap();
+        let instruction_pos = formatted.find("Check the login page").unwrap();
+        assert!(meta_pos < instruction_pos);
     }
 }
