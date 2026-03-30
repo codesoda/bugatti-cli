@@ -1,0 +1,6 @@
+# Static HTML example — no server commands needed.
+# The agent opens index.html directly in the browser.
+
+[provider]
+extra_system_prompt = "Use the browser to open and interact with the local HTML file."
+agent_args = ["--dangerously-skip-permissions"]

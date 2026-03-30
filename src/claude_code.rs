@@ -23,6 +23,8 @@ pub struct ClaudeCodeAdapter {
     artifact_dir: PathBuf,
     /// Whether the session has been started.
     started: bool,
+    /// Whether the first message has been sent (switches from --session-id to --resume).
+    session_created: bool,
 }
 
 /// Format a step message with metadata prefix for sending to the provider.
@@ -41,10 +43,31 @@ pub(crate) fn format_step_message(message: &StepMessage) -> String {
 struct StreamEvent {
     #[serde(rename = "type")]
     event_type: String,
+    /// Present on "assistant" events — contains content blocks.
     #[serde(default)]
-    content: Option<String>,
+    message: Option<AssistantMessage>,
+    /// Present on "result" events — the final text result.
     #[serde(default)]
-    message: Option<String>,
+    result: Option<String>,
+    /// Present on "error" events.
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// The message payload inside an "assistant" stream event.
+#[derive(Debug, Deserialize)]
+struct AssistantMessage {
+    #[serde(default)]
+    content: Vec<ContentBlock>,
+}
+
+/// A single content block inside an assistant message.
+#[derive(Debug, Deserialize)]
+struct ContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 impl ClaudeCodeAdapter {
@@ -56,14 +79,20 @@ impl ClaudeCodeAdapter {
     }
 
     /// Build the command for sending a message to the Claude Code CLI.
+    ///
+    /// The first message uses `--session-id` to create a new session.
+    /// Subsequent messages use `--resume` to continue the existing session.
     fn build_command(&self, message: &str) -> Command {
         let mut cmd = Command::new(&self.binary_path);
-        cmd.arg("-p")
-            .arg(message)
-            .arg("--session-id")
-            .arg(&self.session_id)
-            .arg("--output-format")
-            .arg("stream-json");
+        cmd.arg("-p").arg(message);
+
+        if self.session_created {
+            cmd.arg("--resume").arg(&self.session_id);
+        } else {
+            cmd.arg("--session-id").arg(&self.session_id);
+        }
+
+        cmd.arg("--output-format").arg("stream-json");
 
         for arg in &self.agent_args {
             cmd.arg(arg);
@@ -87,6 +116,9 @@ impl ClaudeCodeAdapter {
         let child = cmd
             .spawn()
             .map_err(|e| ProviderError::SendFailed(format!("failed to spawn claude CLI: {e}")))?;
+
+        // After the first message spawns, subsequent messages use --resume
+        self.session_created = true;
 
         Ok(Box::new(ClaudeCodeStreamIterator::new(child)))
     }
@@ -112,6 +144,7 @@ impl AgentSession for ClaudeCodeAdapter {
             agent_args: config.provider.agent_args.clone(),
             artifact_dir: artifact_dir.to_path_buf(),
             started: false,
+            session_created: false,
         })
     }
 
@@ -216,25 +249,30 @@ impl Iterator for ClaudeCodeStreamIterator {
                     match serde_json::from_str::<StreamEvent>(trimmed) {
                         Ok(event) => match event.event_type.as_str() {
                             "assistant" => {
-                                if let Some(text) = event.content {
-                                    if !text.is_empty() {
-                                        return Some(Ok(OutputChunk::Text(text)));
+                                if let Some(msg) = &event.message {
+                                    for block in &msg.content {
+                                        if block.block_type == "text" {
+                                            if let Some(text) = &block.text {
+                                                if !text.is_empty() {
+                                                    return Some(Ok(OutputChunk::Text(text.clone())));
+                                                }
+                                            }
+                                        }
                                     }
                                 }
-                                // Empty assistant text or no content — skip
                                 continue;
                             }
                             "error" => {
                                 let msg = event
-                                    .message
-                                    .or(event.content)
+                                    .error
+                                    .or(event.result)
                                     .unwrap_or_else(|| "unknown error".to_string());
                                 return Some(Err(ProviderError::StreamError(msg)));
                             }
                             "result" => {
-                                if let Some(text) = event.content {
+                                if let Some(text) = &event.result {
                                     if !text.is_empty() {
-                                        return Some(Ok(OutputChunk::Text(text)));
+                                        return Some(Ok(OutputChunk::Text(text.clone())));
                                     }
                                 }
                                 continue;
@@ -275,6 +313,8 @@ mod tests {
                 extra_system_prompt: Some("Be concise".to_string()),
                 agent_args: vec!["--verbose".to_string()],
                 step_timeout_secs: None,
+                strict_warnings: None,
+                base_url: None,
             },
             commands: BTreeMap::new(),
         }
@@ -288,6 +328,7 @@ mod tests {
             agent_args: vec![],
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: true,
+            session_created: false,
         };
 
         let cmd = adapter.build_command("hello world");
@@ -303,6 +344,25 @@ mod tests {
     }
 
     #[test]
+    fn build_command_uses_resume_after_first_message() {
+        let adapter = ClaudeCodeAdapter {
+            binary_path: PathBuf::from("/usr/bin/claude"),
+            session_id: "test-session-123".to_string(),
+            agent_args: vec![],
+            artifact_dir: PathBuf::from("/tmp/artifacts"),
+            started: true,
+            session_created: true,
+        };
+
+        let cmd = adapter.build_command("step 2");
+        let args: Vec<_> = cmd.get_args().collect();
+
+        assert!(args.contains(&std::ffi::OsStr::new("--resume")));
+        assert!(args.contains(&std::ffi::OsStr::new("test-session-123")));
+        assert!(!args.contains(&std::ffi::OsStr::new("--session-id")));
+    }
+
+    #[test]
     fn build_command_includes_agent_args() {
         let adapter = ClaudeCodeAdapter {
             binary_path: PathBuf::from("/usr/bin/claude"),
@@ -310,6 +370,7 @@ mod tests {
             agent_args: vec!["--model".to_string(), "opus".to_string()],
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: true,
+            session_created: false,
         };
 
         let cmd = adapter.build_command("test");
@@ -327,6 +388,7 @@ mod tests {
             agent_args: vec![],
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: true,
+            session_created: false,
         };
 
         let cmd = adapter.build_command("test");
@@ -344,6 +406,7 @@ mod tests {
             agent_args: vec![],
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: false,
+            session_created: false,
         };
 
         let result = adapter.send_message("hello");
@@ -364,6 +427,7 @@ mod tests {
             agent_args: vec![],
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: true,
+            session_created: false,
         };
 
         adapter.close().unwrap();
@@ -372,26 +436,27 @@ mod tests {
 
     #[test]
     fn parse_assistant_stream_event() {
-        let json = r#"{"type":"assistant","content":"Hello, world!"}"#;
+        let json = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello, world!"}]}}"#;
         let event: StreamEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.event_type, "assistant");
-        assert_eq!(event.content.unwrap(), "Hello, world!");
+        let msg = event.message.unwrap();
+        assert_eq!(msg.content[0].text.as_deref(), Some("Hello, world!"));
     }
 
     #[test]
     fn parse_error_stream_event() {
-        let json = r#"{"type":"error","message":"rate limited"}"#;
+        let json = r#"{"type":"error","error":"rate limited"}"#;
         let event: StreamEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.event_type, "error");
-        assert_eq!(event.message.unwrap(), "rate limited");
+        assert_eq!(event.error.unwrap(), "rate limited");
     }
 
     #[test]
     fn parse_result_stream_event() {
-        let json = r#"{"type":"result","content":"Final answer"}"#;
+        let json = r#"{"type":"result","result":"Final answer"}"#;
         let event: StreamEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.event_type, "result");
-        assert_eq!(event.content.unwrap(), "Final answer");
+        assert_eq!(event.result.unwrap(), "Final answer");
     }
 
     #[test]
@@ -399,7 +464,7 @@ mod tests {
         // Test the iterator with a subprocess that echoes JSON lines
         let child = Command::new("sh")
             .arg("-c")
-            .arg(r#"echo '{"type":"assistant","content":"Hello"}'; echo '{"type":"assistant","content":" world"}'; echo '{"type":"result","content":"Done"}';"#)
+            .arg(r#"echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"}]}}'; echo '{"type":"assistant","message":{"content":[{"type":"text","text":" world"}]}}'; echo '{"type":"result","result":"Done"}';"#)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -444,7 +509,7 @@ mod tests {
     fn stream_iterator_skips_non_json_lines() {
         let child = Command::new("sh")
             .arg("-c")
-            .arg(r#"echo 'not json'; echo '{"type":"assistant","content":"text"}'; echo 'also not json'"#)
+            .arg(r#"echo 'not json'; echo '{"type":"assistant","message":{"content":[{"type":"text","text":"text"}]}}'; echo 'also not json'"#)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -468,7 +533,7 @@ mod tests {
     fn stream_iterator_reports_error_events() {
         let child = Command::new("sh")
             .arg("-c")
-            .arg(r#"echo '{"type":"error","message":"something went wrong"}'"#)
+            .arg(r#"echo '{"type":"error","error":"something went wrong"}'"#)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -516,6 +581,7 @@ mod tests {
             agent_args: vec![],
             artifact_dir: PathBuf::from("/tmp/artifacts"),
             started: false,
+            session_created: false,
         };
 
         assert!(!adapter.started);

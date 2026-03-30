@@ -1,0 +1,13 @@
+name = "Flask API tests"
+
+[[steps]]
+instruction = "Make a GET request to /health and verify the response JSON contains {\"status\": \"ok\"}."
+
+[[steps]]
+instruction = "Make a GET request to /api/items and verify it returns a JSON array with 3 items. Each item should have id, name, and price fields."
+
+[[steps]]
+instruction = "Make a GET request to /api/items/1 and verify it returns the Widget item with price 9.99."
+
+[[steps]]
+instruction = "Make a GET request to /api/items/999 and verify it returns a 404 status with an error message."

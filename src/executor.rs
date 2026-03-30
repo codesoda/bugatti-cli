@@ -214,6 +214,7 @@ pub struct BootstrapConfig<'a> {
     pub test_name: &'a str,
     pub test_file: &'a str,
     pub extra_system_prompt: Option<&'a str>,
+    pub base_url: Option<&'a str>,
 }
 
 /// Build the bootstrap message content sent to the provider at session start.
@@ -258,6 +259,10 @@ pub fn build_bootstrap_content(
     content.push_str(&format!("- Steps: {}\n", total_steps));
     content.push_str(&format!("- Run ID: {}\n", run_id));
     content.push_str(&format!("- Session ID: {}\n", session_id));
+    if let Some(base_url) = config.base_url {
+        content.push_str(&format!("- Base URL: {}\n", base_url));
+        content.push_str("\nAll URLs in step instructions are relative to the Base URL unless a full URL (with host) is provided.\n");
+    }
 
     content
 }
@@ -381,7 +386,12 @@ pub fn execute_steps(
             instruction: step.instruction.clone(),
         };
 
-        let result = execute_single_step(session, message, &timeout, interrupted);
+        // Per-step timeout overrides the test/config-level timeout
+        let effective_timeout = step.step_timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(timeout);
+
+        let result = execute_single_step(session, message, &effective_timeout, interrupted);
 
         let duration = step_start.elapsed();
 
@@ -783,6 +793,7 @@ mod tests {
                 source_file: PathBuf::from("/test/root.test.toml"),
                 source_step_index: 0,
                 parent_chain: vec![],
+                step_timeout_secs: None,
             },
             ExpandedStep {
                 step_id: 1,
@@ -790,6 +801,7 @@ mod tests {
                 source_file: PathBuf::from("/test/root.test.toml"),
                 source_step_index: 1,
                 parent_chain: vec![],
+                step_timeout_secs: None,
             },
         ]
     }
@@ -1428,6 +1440,7 @@ mod tests {
             test_name: "Login test",
             test_file: "tests/login.test.toml",
             extra_system_prompt: None,
+            base_url: None,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1445,6 +1458,7 @@ mod tests {
             test_name: "Login test",
             test_file: "tests/login.test.toml",
             extra_system_prompt: None,
+            base_url: None,
         };
         let run_id = RunId("run-abc".to_string());
         let session_id = SessionId("sess-xyz".to_string());
@@ -1463,6 +1477,7 @@ mod tests {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: Some("Be concise and thorough"),
+            base_url: None,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1481,6 +1496,7 @@ mod tests {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: None,
+            base_url: None,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1488,6 +1504,34 @@ mod tests {
 
         // Should start with harness instructions, not a blank line
         assert!(content.starts_with("You are being driven"));
+    }
+
+    #[test]
+    fn build_bootstrap_content_includes_base_url() {
+        let config = BootstrapConfig {
+            test_name: "Test",
+            test_file: "test.test.toml",
+            extra_system_prompt: None,
+            base_url: Some("http://localhost:3000"),
+        };
+        let run_id = RunId("run-1".to_string());
+        let session_id = SessionId("sess-1".to_string());
+        let content = build_bootstrap_content(&config, 1, &run_id, &session_id);
+        assert!(content.contains("- Base URL: http://localhost:3000"));
+    }
+
+    #[test]
+    fn build_bootstrap_content_omits_base_url_when_none() {
+        let config = BootstrapConfig {
+            test_name: "Test",
+            test_file: "test.test.toml",
+            extra_system_prompt: None,
+            base_url: None,
+        };
+        let run_id = RunId("run-1".to_string());
+        let session_id = SessionId("sess-1".to_string());
+        let content = build_bootstrap_content(&config, 1, &run_id, &session_id);
+        assert!(!content.contains("Base URL"));
     }
 
     #[test]
@@ -1505,6 +1549,7 @@ mod tests {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: None,
+            base_url: None,
         };
 
         let _outcome = execute_steps(

@@ -15,6 +15,8 @@ pub struct ExpandedStep {
     pub source_step_index: usize,
     /// Chain of parent includes that led to this step (outermost first).
     pub parent_chain: Vec<PathBuf>,
+    /// Optional per-step timeout override in seconds.
+    pub step_timeout_secs: Option<u64>,
 }
 
 /// Error type for step expansion.
@@ -104,6 +106,7 @@ fn expand_steps_inner(
                 source_file: file_path.to_path_buf(),
                 source_step_index: i,
                 parent_chain: parent_chain.to_vec(),
+                step_timeout_secs: step.step_timeout_secs,
             });
             *step_id += 1;
         } else if let Some(ref include_path) = step.include_path {
@@ -224,7 +227,7 @@ instruction = "Step two"
             &included_path,
             r#"
 name = "Setup"
-include_only = true
+
 
 [[steps]]
 instruction = "Run migrations"
@@ -273,7 +276,7 @@ instruction = "Verify state"
             tests_dir.join("a.test.toml"),
             r#"
 name = "Test A"
-include_only = true
+
 
 [[steps]]
 instruction = "Step A"
@@ -285,7 +288,7 @@ instruction = "Step A"
             tests_dir.join("b.test.toml"),
             r#"
 name = "Test B"
-include_only = true
+
 
 [[steps]]
 instruction = "Step B"
@@ -326,7 +329,7 @@ include_glob = "tests/*.test.toml"
             &leaf_path,
             r#"
 name = "Leaf"
-include_only = true
+
 
 [[steps]]
 instruction = "Leaf step"
@@ -339,7 +342,7 @@ instruction = "Leaf step"
             &mid_path,
             r#"
 name = "Mid"
-include_only = true
+
 
 [[steps]]
 instruction = "Mid before"
@@ -431,7 +434,7 @@ include_path = "b.test.toml"
             &b_path,
             r#"
 name = "B"
-include_only = true
+
 
 [[steps]]
 include_path = "a.test.toml"
@@ -454,7 +457,7 @@ include_path = "a.test.toml"
             &included_path,
             r#"
 name = "Included"
-include_only = true
+
 
 [[steps]]
 instruction = "Included step 0"

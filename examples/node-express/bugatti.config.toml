@@ -1,0 +1,15 @@
+# Node/Express example — install deps then start the server.
+
+[provider]
+extra_system_prompt = "This is an Express.js TypeScript app. Use the browser for UI tests. Use curl or fetch for API tests."
+base_url = "http://localhost:3111"
+agent_args = ["--dangerously-skip-permissions"]
+
+[commands.install]
+kind = "short_lived"
+cmd = "pnpm install"
+
+[commands.server]
+kind = "long_lived"
+cmd = "npx tsx src/server.ts"
+readiness_url = "http://localhost:3111/health"

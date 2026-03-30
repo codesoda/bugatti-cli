@@ -1,0 +1,13 @@
+name = "Express UI tests"
+
+[[steps]]
+include_path = "_setup.test.toml"
+
+[[steps]]
+instruction = "Open / in the browser. Verify the page title is 'Todo App' and the heading 'Todo List' is visible."
+
+[[steps]]
+instruction = "Verify the page displays the initial 3 todos in a list."
+
+[[steps]]
+instruction = "Type 'New browser todo' into the input field and click the Add button. Verify the new todo appears in the list."
