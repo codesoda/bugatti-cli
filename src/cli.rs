@@ -43,5 +43,9 @@ pub enum Commands {
         /// When set, runs with only warnings exit non-zero (exit code 1).
         #[arg(long)]
         strict_warnings: bool,
+
+        /// Enable verbose output: show full prompts, provider command lines, and timing details.
+        #[arg(long, short)]
+        verbose: bool,
     },
 }

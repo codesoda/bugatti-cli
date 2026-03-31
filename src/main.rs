@@ -60,7 +60,7 @@ fn main() {
     let cli = Cli::parse();
 
     let code = match cli.command {
-        Commands::Test { path, skip_cmds, skip_readiness, strict_warnings } => {
+        Commands::Test { path, skip_cmds, skip_readiness, strict_warnings, verbose } => {
             let project_root = std::env::current_dir().unwrap_or_else(|e| {
                 eprintln!("ERROR: failed to determine current directory: {e}");
                 std::process::exit(EXIT_CONFIG_ERROR);
@@ -76,7 +76,7 @@ fn main() {
                         eprintln!("ERROR: test file not found: {p}");
                         EXIT_CONFIG_ERROR
                     } else {
-                        let result = run_test_pipeline(&project_root, &test_path, &skip_cmds, &skip_readiness, strict_warnings);
+                        let result = run_test_pipeline(&project_root, &test_path, &skip_cmds, &skip_readiness, strict_warnings, verbose);
                         // Print run reference for single-file mode
                         if let Some(run_id) = &result.run_id {
                             println!("\nRun ID: {run_id}");
@@ -92,7 +92,7 @@ fn main() {
                         result.exit_code
                     }
                 }
-                None => run_discovery(&project_root, &skip_cmds, &skip_readiness, strict_warnings),
+                None => run_discovery(&project_root, &skip_cmds, &skip_readiness, strict_warnings, verbose),
             }
         }
     };
@@ -104,7 +104,7 @@ fn main() {
 ///
 /// Pipeline order: config load -> parse -> expand -> artifact setup -> command setup
 /// -> provider init -> step execution -> report -> teardown -> exit
-fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool) -> TestRunResult {
+fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool, verbose: bool) -> TestRunResult {
     let test_name_fallback = test_path.display().to_string();
 
     // Phase 1: Load config
@@ -213,6 +213,7 @@ fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String]
         artifact_dir: &artifact_dir,
         config_summary: EffectiveConfigSummary::from_config(&effective),
         start_time: chrono::Utc::now(),
+        verbose,
     };
     run_test_with_artifacts(&ctx, steps)
 }
@@ -230,6 +231,7 @@ struct PipelineContext<'a> {
     artifact_dir: &'a ArtifactDir,
     config_summary: EffectiveConfigSummary,
     start_time: chrono::DateTime<chrono::Utc>,
+    verbose: bool,
 }
 
 impl<'a> PipelineContext<'a> {
@@ -329,7 +331,7 @@ fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::Ex
         };
 
     // Phase 10: Initialize provider session
-    let mut session = match ClaudeCodeAdapter::initialize(ctx.effective, &ctx.artifact_dir.root) {
+    let mut session = match ClaudeCodeAdapter::initialize(ctx.effective, &ctx.artifact_dir.root, ctx.verbose) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "provider initialization failed");
@@ -419,7 +421,7 @@ fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::Ex
 
 /// Discover and run all root test files, printing an aggregate summary.
 /// Returns the aggregate exit code.
-fn run_discovery(project_root: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool) -> i32 {
+fn run_discovery(project_root: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool, verbose: bool) -> i32 {
     println!("Discovering root test files...");
 
     let discovery = match discover_root_tests(project_root) {
@@ -469,7 +471,7 @@ fn run_discovery(project_root: &Path, skip_cmds: &[String], skip_readiness: &[St
             });
             continue;
         }
-        let result = run_single_test(test, project_root, skip_cmds, skip_readiness, strict_warnings);
+        let result = run_single_test(test, project_root, skip_cmds, skip_readiness, strict_warnings, verbose);
         results.push(result);
     }
 
@@ -501,12 +503,13 @@ fn run_single_test(
     skip_cmds: &[String],
     skip_readiness: &[String],
     strict_warnings: bool,
+    verbose: bool,
 ) -> TestRunResult {
     println!("═══════════════════════════════════════════════════════");
     println!("Running: {} ({})", test.name, test.path.display());
     println!("═══════════════════════════════════════════════════════");
 
-    let result = run_test_pipeline(project_root, &test.path, skip_cmds, skip_readiness, strict_warnings);
+    let result = run_test_pipeline(project_root, &test.path, skip_cmds, skip_readiness, strict_warnings, verbose);
 
     if let Some(err) = &result.error {
         eprintln!("  ERROR: {err}");
