@@ -33,5 +33,19 @@ pub enum Commands {
         /// Readiness checks for skipped commands still run by default.
         #[arg(long = "skip-cmd")]
         skip_cmds: Vec<String>,
+
+        /// Skip readiness checks for the named commands (can be repeated).
+        /// Only meaningful for commands also passed to --skip-cmd.
+        #[arg(long = "skip-readiness")]
+        skip_readiness: Vec<String>,
+
+        /// Treat WARN verdicts as failures for exit code purposes.
+        /// When set, runs with only warnings exit non-zero (exit code 1).
+        #[arg(long)]
+        strict_warnings: bool,
+
+        /// Enable verbose output: show full prompts, provider command lines, and timing details.
+        #[arg(long, short)]
+        verbose: bool,
     },
 }

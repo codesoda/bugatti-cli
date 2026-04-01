@@ -1,0 +1,4 @@
+name = "Shared setup verification"
+
+[[steps]]
+instruction = "Make a GET request to /health and verify the response contains {\"status\": \"ok\"}. This confirms the server is running."

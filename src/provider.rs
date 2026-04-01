@@ -11,6 +11,10 @@ pub struct StepMessage {
     pub session_id: SessionId,
     /// Sequential step identifier within the run.
     pub step_id: usize,
+    /// Total number of steps in the run.
+    pub total_steps: usize,
+    /// Source file this step originated from.
+    pub source_file: String,
     /// The instruction text for this step.
     pub instruction: String,
 }
@@ -47,7 +51,7 @@ pub trait AgentSession {
     /// in `config.provider`.
     ///
     /// `artifact_dir` points to the run's artifact directory for transcript/log storage.
-    fn initialize(config: &Config, artifact_dir: &Path) -> Result<Self, ProviderError>
+    fn initialize(config: &Config, artifact_dir: &Path, verbose: bool) -> Result<Self, ProviderError>
     where
         Self: Sized;
 

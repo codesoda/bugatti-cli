@@ -42,7 +42,7 @@ impl MockProvider {
 }
 
 impl AgentSession for MockProvider {
-    fn initialize(_config: &Config, _artifact_dir: &Path) -> Result<Self, ProviderError>
+    fn initialize(_config: &Config, _artifact_dir: &Path, _verbose: bool) -> Result<Self, ProviderError>
     where
         Self: Sized,
     {
@@ -160,6 +160,8 @@ instruction = "Verify the login form is present"
         &session_id,
         &artifact_dir,
         Some(Duration::from_secs(30)),
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
     )
     .unwrap();
 
@@ -299,6 +301,8 @@ instruction = "This step will fail"
         &session_id,
         &artifact_dir,
         Some(Duration::from_secs(30)),
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
     )
     .unwrap();
 

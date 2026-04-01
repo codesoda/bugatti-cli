@@ -47,7 +47,7 @@ impl std::error::Error for DiscoveryError {}
 /// Result of discovering test files — includes both successfully parsed roots and per-file errors.
 #[derive(Debug)]
 pub struct DiscoveryResult {
-    /// Root test files that parsed successfully and are not include_only.
+    /// Root test files that parsed successfully (excludes `_`-prefixed files).
     pub tests: Vec<DiscoveredTest>,
     /// Per-file parse/cycle errors encountered during discovery.
     pub errors: Vec<DiscoveryError>,
@@ -55,7 +55,8 @@ pub struct DiscoveryResult {
 
 /// Discover all root *.test.toml files under the given directory (recursively).
 ///
-/// Files marked `include_only = true` are excluded from the result.
+/// Files with a `_` prefix (e.g. `_setup.test.toml`) are skipped — these are
+/// meant to be included by other test files, not run directly.
 /// Discovery order is deterministic (sorted by path).
 /// Parse errors are collected per-file rather than aborting discovery.
 pub fn discover_root_tests(root: &Path) -> Result<DiscoveryResult, DiscoveryError> {
@@ -74,12 +75,10 @@ pub fn discover_root_tests(root: &Path) -> Result<DiscoveryResult, DiscoveryErro
     for path in test_files {
         match parse_test_file(&path) {
             Ok(test_file) => {
-                if !test_file.include_only {
-                    tests.push(DiscoveredTest {
-                        path,
-                        name: test_file.name,
-                    });
-                }
+                tests.push(DiscoveredTest {
+                    path,
+                    name: test_file.name,
+                });
             }
             Err(e) => {
                 errors.push(DiscoveryError::ParseError { path, source: e });
@@ -107,7 +106,7 @@ fn collect_test_files(dir: &Path, results: &mut Vec<PathBuf>) -> Result<(), std:
                 }
             }
         } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.ends_with(".test.toml") {
+            if name.ends_with(".test.toml") && !name.starts_with('_') {
                 results.push(path);
             }
         }
@@ -160,7 +159,7 @@ instruction = "Navigate to signup"
     }
 
     #[test]
-    fn discover_excludes_include_only_files() {
+    fn discover_excludes_underscore_prefixed_files() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("root.test.toml"),
@@ -173,10 +172,9 @@ instruction = "Do something"
         )
         .unwrap();
         fs::write(
-            dir.path().join("shared.test.toml"),
+            dir.path().join("_setup.test.toml"),
             r#"
 name = "Shared steps"
-include_only = true
 
 [[steps]]
 instruction = "Setup step"

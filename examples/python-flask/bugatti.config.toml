@@ -1,0 +1,11 @@
+# Python Flask example — starts the Flask dev server as a long-lived process.
+
+[provider]
+strict_warnings = true
+base_url = "http://localhost:5111"
+agent_args = ["--dangerously-skip-permissions"]
+
+[commands.server]
+kind = "long_lived"
+cmd = "python3 app.py"
+readiness_url = "http://localhost:5111/health"

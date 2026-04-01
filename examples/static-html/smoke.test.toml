@@ -1,0 +1,16 @@
+name = "Static site smoke test"
+
+[[steps]]
+instruction = "Open index.html in the browser. Verify the page title is 'Bugatti Example - Static Site' and the heading 'Welcome to the Example Site' is visible."
+
+[[steps]]
+instruction = "Verify the navigation bar contains three links: Home, About, and Contact."
+
+[[steps]]
+instruction = "Click the 'Contact' nav link. Verify the contact form is visible with Name, Email, and Message fields."
+
+[[steps]]
+instruction = "Submit the contact form with all fields empty. Verify that validation error messages appear."
+
+[[steps]]
+instruction = "Fill in the contact form with valid data (any name, a valid email, and a message) and submit. Verify the success message 'Thank you! Your message has been sent.' appears."

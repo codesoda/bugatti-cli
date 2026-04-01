@@ -1,0 +1,7 @@
+name = "Flask UI tests"
+
+[[steps]]
+instruction = "Open / in the browser. Verify the page title is 'Item Store' and the heading is visible."
+
+[[steps]]
+instruction = "Verify that the page displays a list of 3 items with their names and prices (Widget, Gadget, Doohickey)."

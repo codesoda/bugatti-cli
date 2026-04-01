@@ -1,0 +1,19 @@
+name = "Express API tests"
+
+[[steps]]
+include_path = "_setup.test.toml"
+
+[[steps]]
+instruction = "Make a GET request to /api/todos and verify it returns a JSON array with 3 todos. Each todo should have id, title, and completed fields."
+
+[[steps]]
+instruction = "Make a POST request to /api/todos with JSON body {\"title\": \"Test todo\"} and verify it returns a 201 status with the new todo including an id."
+
+[[steps]]
+instruction = "Make a GET request to /api/todos again and verify there are now 4 todos, with the last one being 'Test todo'."
+
+[[steps]]
+instruction = "Make a POST request to /api/todos with an empty JSON body {} and verify it returns a 400 status with an error message."
+
+[[steps]]
+instruction = "Make a GET request to http://localhost:3112/stats (the admin server on a different port) and verify it returns JSON with todo_count, completed_count, and uptime fields."

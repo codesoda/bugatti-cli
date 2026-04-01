@@ -1,9 +1,10 @@
-use crate::diagnostics::EvidenceRef;
+use crate::diagnostics::{EvidenceKind, EvidenceRef};
 use crate::expand::ExpandedStep;
-use crate::provider::{AgentSession, OutputChunk, ProviderError, StepMessage};
+use crate::provider::{AgentSession, BootstrapMessage, OutputChunk, ProviderError, StepMessage};
 use crate::run::{ArtifactDir, RunId, SessionId};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// The prefix that marks a log event line in provider output.
@@ -167,20 +168,42 @@ impl From<ProviderError> for ExecutorError {
 
 /// Parse the RESULT contract marker from accumulated output text.
 ///
-/// Scans from the end of the text for the last line matching:
+/// Scans from the end of the text for the last occurrence of a RESULT marker.
+///
+/// Matches:
 ///   RESULT OK
 ///   RESULT WARN: <message>
 ///   RESULT ERROR: <message>
 ///
-/// Free-form text before the result marker is allowed.
+/// The marker can appear on its own line or embedded at the end of a line
+/// (agents sometimes omit the newline before the marker).
 pub fn parse_result_marker(text: &str) -> Option<StepVerdict> {
-    // Scan lines in reverse to find the last RESULT marker
+    // First try line-based scan (most common case)
     for line in text.lines().rev() {
         let trimmed = line.trim();
         if let Some(verdict) = try_parse_result_line(trimmed) {
             return Some(verdict);
         }
     }
+
+    // Fallback: scan for RESULT marker embedded anywhere in text.
+    // Find the last occurrence and parse from there.
+    let mut pos = text.len();
+    while pos > 0 {
+        if let Some(idx) = text[..pos].rfind("RESULT ") {
+            let from_marker = &text[idx..];
+            // Take up to the next newline (or end of string)
+            let end = from_marker.find('\n').unwrap_or(from_marker.len());
+            let candidate = from_marker[..end].trim();
+            if let Some(verdict) = try_parse_result_line(candidate) {
+                return Some(verdict);
+            }
+            pos = idx;
+        } else {
+            break;
+        }
+    }
+
     None
 }
 
@@ -208,10 +231,69 @@ fn try_parse_result_line(line: &str) -> Option<StepVerdict> {
     None
 }
 
+/// Configuration for the bootstrap message sent at session start.
+pub struct BootstrapConfig<'a> {
+    pub test_name: &'a str,
+    pub test_file: &'a str,
+    pub extra_system_prompt: Option<&'a str>,
+    pub base_url: Option<&'a str>,
+}
+
+/// Build the bootstrap message content sent to the provider at session start.
+///
+/// Includes the result contract, BUGATTI_LOG format, test metadata, and
+/// extra system prompt (if configured).
+pub fn build_bootstrap_content(
+    config: &BootstrapConfig,
+    total_steps: usize,
+    run_id: &RunId,
+    session_id: &SessionId,
+) -> String {
+    let mut content = String::new();
+
+    // Extra system prompt first (if provided)
+    if let Some(prompt) = config.extra_system_prompt {
+        content.push_str(prompt);
+        content.push_str("\n\n");
+    }
+
+    // Harness instructions
+    content.push_str("You are being driven by the Bugatti test harness. ");
+    content.push_str("Follow these rules for every step:\n\n");
+
+    // Result contract
+    content.push_str("## Result Contract\n\n");
+    content.push_str("After completing each step, you MUST emit exactly one result line as the final line of your response:\n");
+    content.push_str("- `RESULT OK` — the step passed\n");
+    content.push_str("- `RESULT WARN: <message>` — the step passed with a warning\n");
+    content.push_str("- `RESULT ERROR: <message>` — the step failed\n\n");
+    content.push_str("Free-form text before the result line is allowed and encouraged.\n\n");
+
+    // BUGATTI_LOG format
+    content.push_str("## Logging\n\n");
+    content.push_str("To emit structured log events visible in the harness, output a line matching:\n");
+    content.push_str("`BUGATTI_LOG <message>`\n\n");
+
+    // Test metadata
+    content.push_str("## Test Metadata\n\n");
+    content.push_str(&format!("- Test: {}\n", config.test_name));
+    content.push_str(&format!("- File: {}\n", config.test_file));
+    content.push_str(&format!("- Steps: {}\n", total_steps));
+    content.push_str(&format!("- Run ID: {}\n", run_id));
+    content.push_str(&format!("- Session ID: {}\n", session_id));
+    if let Some(base_url) = config.base_url {
+        content.push_str(&format!("- Base URL: {}\n", base_url));
+        content.push_str("\nAll URLs in step instructions are relative to the Base URL unless a full URL (with host) is provided.\n");
+    }
+
+    content
+}
+
 /// Execute all expanded steps sequentially within one provider session.
 ///
 /// Returns the run outcome with all step results.
 /// The provider session must already be initialized and started.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_steps(
     session: &mut dyn AgentSession,
     steps: &[ExpandedStep],
@@ -219,6 +301,8 @@ pub fn execute_steps(
     session_id: &SessionId,
     artifact_dir: &ArtifactDir,
     step_timeout: Option<Duration>,
+    bootstrap_config: Option<&BootstrapConfig>,
+    interrupted: &AtomicBool,
 ) -> Result<RunOutcome, ExecutorError> {
     let timeout = step_timeout.unwrap_or(Duration::from_secs(DEFAULT_STEP_TIMEOUT_SECS));
     let mut outcomes = Vec::with_capacity(steps.len());
@@ -243,7 +327,62 @@ pub fn execute_steps(
         }
     };
 
+    // Send bootstrap message before any steps
+    if let Some(config) = bootstrap_config {
+        let content = build_bootstrap_content(config, total_steps, run_id, session_id);
+        tracing::info!("sending bootstrap message");
+        println!("BOOTSTRAP .. sending harness instructions");
+
+        let bootstrap_msg = BootstrapMessage {
+            run_id: run_id.clone(),
+            session_id: session_id.clone(),
+            content,
+        };
+
+        let bootstrap_start = Instant::now();
+        match session.send_bootstrap(bootstrap_msg) {
+            Ok(stream) => {
+                let mut bootstrap_transcript = String::new();
+                for chunk in stream {
+                    match chunk {
+                        Ok(OutputChunk::Text(text)) => bootstrap_transcript.push_str(&text),
+                        Ok(OutputChunk::Done) => break,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "bootstrap stream error (non-fatal)");
+                            break;
+                        }
+                    }
+                }
+                // Write bootstrap transcript
+                let bootstrap_path = artifact_dir.transcripts.join("bootstrap.txt");
+                if let Err(e) = std::fs::write(&bootstrap_path, &bootstrap_transcript) {
+                    let msg = format!("failed to write bootstrap transcript: {e}");
+                    tracing::error!("{msg}");
+                    artifact_errors.push(msg);
+                }
+                if let Some(ref mut f) = full_transcript_file {
+                    let _ = writeln!(f, "=== Bootstrap ===");
+                    let _ = writeln!(f, "{}", bootstrap_transcript);
+                    let _ = writeln!(f);
+                }
+                let bootstrap_duration = bootstrap_start.elapsed();
+                tracing::info!(duration_ms = bootstrap_duration.as_millis() as u64, "bootstrap complete");
+                println!("OK ......... bootstrap ({:.1}s)", bootstrap_duration.as_secs_f64());
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "bootstrap send failed");
+                return Err(ExecutorError::Provider(e));
+            }
+        }
+    }
+
     for step in steps {
+        // Check for interruption between steps
+        if interrupted.load(Ordering::Relaxed) {
+            tracing::warn!("interrupted before step {}", step.step_id);
+            break;
+        }
+
         // Print step begin
         let instruction_summary = truncate_instruction(&step.instruction, 60);
         tracing::info!(
@@ -266,10 +405,17 @@ pub fn execute_steps(
             run_id: run_id.clone(),
             session_id: session_id.clone(),
             step_id: step.step_id,
+            total_steps,
+            source_file: step.source_file.display().to_string(),
             instruction: step.instruction.clone(),
         };
 
-        let result = execute_single_step(session, message, &timeout);
+        // Per-step timeout overrides the test/config-level timeout
+        let effective_timeout = step.step_timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(timeout);
+
+        let result = execute_single_step(session, message, &effective_timeout, interrupted);
 
         let duration = step_start.elapsed();
 
@@ -334,6 +480,18 @@ pub fn execute_steps(
             }
         }
 
+        // Auto-attach evidence refs for non-OK steps
+        let evidence_refs = if !step_result.is_pass() || matches!(&step_result, StepResult::Verdict(StepVerdict::Warn(_))) {
+            vec![EvidenceRef {
+                kind: EvidenceKind::CommandLog,
+                path: transcript_path.clone(),
+                description: format!("Step {} transcript", step.step_id),
+                collection_error: if transcript_path.exists() { None } else { Some("transcript file not written".to_string()) },
+            }]
+        } else {
+            vec![]
+        };
+
         let outcome = StepOutcome {
             step_id: step.step_id,
             instruction: step.instruction.clone(),
@@ -341,7 +499,7 @@ pub fn execute_steps(
             result: step_result,
             transcript,
             log_events,
-            evidence_refs: vec![],
+            evidence_refs,
             duration,
         };
 
@@ -363,6 +521,50 @@ pub fn execute_steps(
 
     // Print final run status
     print_run_summary(&outcomes, total_duration, total_steps);
+
+    // Send teardown message (best-effort, non-fatal)
+    if !interrupted.load(Ordering::Relaxed) {
+        println!("TEARDOWN .. cleaning up");
+        let teardown_msg = StepMessage {
+            run_id: run_id.clone(),
+            session_id: session_id.clone(),
+            step_id: total_steps,
+            total_steps,
+            source_file: "teardown".to_string(),
+            instruction: "All test steps are complete. Close any browsers, tools, or resources you opened during this session.".to_string(),
+        };
+        match session.send_step(teardown_msg) {
+            Ok(stream) => {
+                let teardown_start = Instant::now();
+                let teardown_timeout = Duration::from_secs(30);
+                let mut teardown_transcript = String::new();
+                for chunk in stream {
+                    if teardown_start.elapsed() > teardown_timeout {
+                        tracing::warn!("teardown timed out");
+                        break;
+                    }
+                    match chunk {
+                        Ok(OutputChunk::Text(text)) => teardown_transcript.push_str(&text),
+                        Ok(OutputChunk::Done) => break,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "teardown stream error");
+                            break;
+                        }
+                    }
+                }
+                if let Some(ref mut f) = full_transcript_file {
+                    let _ = writeln!(f, "=== Teardown ===");
+                    let _ = writeln!(f, "{}", teardown_transcript);
+                    let _ = writeln!(f);
+                }
+                println!("OK ......... teardown");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "teardown send failed (non-fatal)");
+                println!("WARN ....... teardown failed: {e}");
+            }
+        }
+    }
 
     // Flush/close the full transcript file
     drop(full_transcript_file);
@@ -457,6 +659,7 @@ fn execute_single_step(
     session: &mut dyn AgentSession,
     message: StepMessage,
     timeout: &Duration,
+    interrupted: &AtomicBool,
 ) -> Result<(String, StepResult), (String, StepResult)> {
     let start = Instant::now();
     let mut transcript = String::new();
@@ -477,6 +680,15 @@ fn execute_single_step(
                 "step timed out during streaming"
             );
             return Err((transcript, StepResult::Timeout));
+        }
+
+        // Check for Ctrl+C interruption
+        if interrupted.load(Ordering::Relaxed) {
+            tracing::warn!("step interrupted by Ctrl+C during streaming");
+            return Err((
+                transcript,
+                StepResult::ProviderFailed("interrupted by Ctrl+C".to_string()),
+            ));
         }
 
         match chunk_result {
@@ -579,6 +791,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_result_embedded_in_line() {
+        // Agent omits newline before RESULT marker
+        let text = "Success message confirmed visible.RESULT OK";
+        assert_eq!(parse_result_marker(text), Some(StepVerdict::Ok));
+    }
+
+    #[test]
+    fn parse_result_embedded_with_duplicate() {
+        // Agent emits RESULT OK twice without newlines
+        let text = "Log line.RESULT OKRESULT OK";
+        assert_eq!(parse_result_marker(text), Some(StepVerdict::Ok));
+    }
+
+    #[test]
     fn parse_result_warn_with_extra_whitespace() {
         assert_eq!(
             parse_result_marker("RESULT WARN:   extra spaces  "),
@@ -603,7 +829,7 @@ mod tests {
     }
 
     impl AgentSession for MockSession {
-        fn initialize(_config: &Config, _artifact_dir: &Path) -> Result<Self, ProviderError>
+        fn initialize(_config: &Config, _artifact_dir: &Path, _verbose: bool) -> Result<Self, ProviderError>
         where
             Self: Sized,
         {
@@ -649,6 +875,7 @@ mod tests {
                 source_file: PathBuf::from("/test/root.test.toml"),
                 source_step_index: 0,
                 parent_chain: vec![],
+                step_timeout_secs: None,
             },
             ExpandedStep {
                 step_id: 1,
@@ -656,6 +883,7 @@ mod tests {
                 source_file: PathBuf::from("/test/root.test.toml"),
                 source_step_index: 1,
                 parent_chain: vec![],
+                step_timeout_secs: None,
             },
         ]
     }
@@ -703,6 +931,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -745,6 +975,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -780,6 +1012,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -811,6 +1045,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -837,6 +1073,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -865,6 +1103,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -895,6 +1135,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -938,6 +1180,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -980,6 +1224,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -1010,6 +1256,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -1048,6 +1296,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -1127,6 +1377,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -1156,6 +1408,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -1185,6 +1439,8 @@ mod tests {
             &session_id,
             &artifact_dir,
             None,
+            None,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -1198,5 +1454,246 @@ mod tests {
         let transcript_path = artifact_dir.transcripts.join("step_0000.txt");
         let transcript = std::fs::read_to_string(&transcript_path).unwrap();
         assert!(transcript.contains("BUGATTI_LOG Migration complete"));
+    }
+
+    // --- Evidence ref tests ---
+
+    #[test]
+    fn execute_steps_evidence_refs_for_error() {
+        let steps = vec![test_steps().remove(0)];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![vec![
+            Ok(OutputChunk::Text("RESULT ERROR: page not found".to_string())),
+            Ok(OutputChunk::Done),
+        ]]);
+
+        let outcome = execute_steps(
+            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, &AtomicBool::new(false),
+        ).unwrap();
+
+        assert_eq!(outcome.steps[0].evidence_refs.len(), 1);
+        assert_eq!(outcome.steps[0].evidence_refs[0].kind, crate::diagnostics::EvidenceKind::CommandLog);
+        assert!(outcome.steps[0].evidence_refs[0].collection_error.is_none());
+    }
+
+    #[test]
+    fn execute_steps_evidence_refs_for_warn() {
+        let steps = vec![test_steps().remove(0)];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![vec![
+            Ok(OutputChunk::Text("RESULT WARN: slow response".to_string())),
+            Ok(OutputChunk::Done),
+        ]]);
+
+        let outcome = execute_steps(
+            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, &AtomicBool::new(false),
+        ).unwrap();
+
+        assert_eq!(outcome.steps[0].evidence_refs.len(), 1);
+    }
+
+    #[test]
+    fn execute_steps_evidence_refs_empty_for_ok() {
+        let steps = vec![test_steps().remove(0)];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![vec![
+            Ok(OutputChunk::Text("RESULT OK".to_string())),
+            Ok(OutputChunk::Done),
+        ]]);
+
+        let outcome = execute_steps(
+            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, &AtomicBool::new(false),
+        ).unwrap();
+
+        assert!(outcome.steps[0].evidence_refs.is_empty());
+    }
+
+    // --- Bootstrap tests ---
+
+    #[test]
+    fn build_bootstrap_content_includes_result_contract() {
+        let config = BootstrapConfig {
+            test_name: "Login test",
+            test_file: "tests/login.test.toml",
+            extra_system_prompt: None,
+            base_url: None,
+        };
+        let run_id = RunId("run-1".to_string());
+        let session_id = SessionId("sess-1".to_string());
+        let content = build_bootstrap_content(&config, 3, &run_id, &session_id);
+
+        assert!(content.contains("RESULT OK"));
+        assert!(content.contains("RESULT WARN:"));
+        assert!(content.contains("RESULT ERROR:"));
+        assert!(content.contains("BUGATTI_LOG"));
+    }
+
+    #[test]
+    fn build_bootstrap_content_includes_test_metadata() {
+        let config = BootstrapConfig {
+            test_name: "Login test",
+            test_file: "tests/login.test.toml",
+            extra_system_prompt: None,
+            base_url: None,
+        };
+        let run_id = RunId("run-abc".to_string());
+        let session_id = SessionId("sess-xyz".to_string());
+        let content = build_bootstrap_content(&config, 5, &run_id, &session_id);
+
+        assert!(content.contains("Login test"));
+        assert!(content.contains("tests/login.test.toml"));
+        assert!(content.contains("Steps: 5"));
+        assert!(content.contains("run-abc"));
+        assert!(content.contains("sess-xyz"));
+    }
+
+    #[test]
+    fn build_bootstrap_content_includes_extra_system_prompt() {
+        let config = BootstrapConfig {
+            test_name: "Test",
+            test_file: "test.test.toml",
+            extra_system_prompt: Some("Be concise and thorough"),
+            base_url: None,
+        };
+        let run_id = RunId("run-1".to_string());
+        let session_id = SessionId("sess-1".to_string());
+        let content = build_bootstrap_content(&config, 1, &run_id, &session_id);
+
+        assert!(content.contains("Be concise and thorough"));
+        // Extra system prompt should appear before the harness instructions
+        let prompt_pos = content.find("Be concise").unwrap();
+        let contract_pos = content.find("Result Contract").unwrap();
+        assert!(prompt_pos < contract_pos);
+    }
+
+    #[test]
+    fn build_bootstrap_content_omits_prompt_when_none() {
+        let config = BootstrapConfig {
+            test_name: "Test",
+            test_file: "test.test.toml",
+            extra_system_prompt: None,
+            base_url: None,
+        };
+        let run_id = RunId("run-1".to_string());
+        let session_id = SessionId("sess-1".to_string());
+        let content = build_bootstrap_content(&config, 1, &run_id, &session_id);
+
+        // Should start with harness instructions, not a blank line
+        assert!(content.starts_with("You are being driven"));
+    }
+
+    #[test]
+    fn build_bootstrap_content_includes_base_url() {
+        let config = BootstrapConfig {
+            test_name: "Test",
+            test_file: "test.test.toml",
+            extra_system_prompt: None,
+            base_url: Some("http://localhost:3000"),
+        };
+        let run_id = RunId("run-1".to_string());
+        let session_id = SessionId("sess-1".to_string());
+        let content = build_bootstrap_content(&config, 1, &run_id, &session_id);
+        assert!(content.contains("- Base URL: http://localhost:3000"));
+    }
+
+    #[test]
+    fn build_bootstrap_content_omits_base_url_when_none() {
+        let config = BootstrapConfig {
+            test_name: "Test",
+            test_file: "test.test.toml",
+            extra_system_prompt: None,
+            base_url: None,
+        };
+        let run_id = RunId("run-1".to_string());
+        let session_id = SessionId("sess-1".to_string());
+        let content = build_bootstrap_content(&config, 1, &run_id, &session_id);
+        assert!(!content.contains("Base URL"));
+    }
+
+    #[test]
+    fn execute_steps_with_bootstrap_writes_transcript() {
+        let steps = vec![test_steps().remove(0)];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![vec![
+            Ok(OutputChunk::Text("RESULT OK".to_string())),
+            Ok(OutputChunk::Done),
+        ]]);
+
+        let bootstrap = BootstrapConfig {
+            test_name: "Test",
+            test_file: "test.test.toml",
+            extra_system_prompt: None,
+            base_url: None,
+        };
+
+        let _outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+            Some(&bootstrap),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        // Bootstrap transcript file should exist
+        let bootstrap_path = artifact_dir.transcripts.join("bootstrap.txt");
+        assert!(bootstrap_path.is_file());
+
+        // Full transcript should contain bootstrap section
+        let full = std::fs::read_to_string(artifact_dir.transcripts.join("full_transcript.txt")).unwrap();
+        assert!(full.contains("=== Bootstrap ==="));
+    }
+
+    // --- Interrupt tests ---
+
+    #[test]
+    fn execute_steps_interrupted_between_steps() {
+        let steps = test_steps(); // 2 steps
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![
+            vec![
+                Ok(OutputChunk::Text("RESULT OK".to_string())),
+                Ok(OutputChunk::Done),
+            ],
+            vec![
+                Ok(OutputChunk::Text("RESULT OK".to_string())),
+                Ok(OutputChunk::Done),
+            ],
+        ]);
+
+        // Set interrupted flag — will be checked before step 2
+        let flag = AtomicBool::new(false);
+
+        // We can't set the flag between steps in this test easily,
+        // so set it before execution starts — step 1 won't even run
+        flag.store(true, Ordering::Relaxed);
+
+        let outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+            None,
+            &flag,
+        )
+        .unwrap();
+
+        // No steps should have executed
+        assert_eq!(outcome.steps.len(), 0);
     }
 }

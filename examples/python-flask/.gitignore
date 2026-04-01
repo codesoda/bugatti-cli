@@ -1,0 +1,4 @@
+.bugatti/
+__pycache__/
+*.pyc
+.venv/

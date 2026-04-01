@@ -1,0 +1,9 @@
+# Rust CLI example — build the binary before testing.
+
+[provider]
+step_timeout_secs = 120
+agent_args = ["--dangerously-skip-permissions"]
+
+[commands.build]
+kind = "short_lived"
+cmd = "cargo build"
