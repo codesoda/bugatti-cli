@@ -1,30 +1,55 @@
 use crate::config::Config;
 use crate::provider::{AgentSession, BootstrapMessage, OutputChunk, ProviderError, StepMessage};
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+
+/// ANSI color codes for verbose output.
+mod color {
+    // Label prefix — dim grey
+    pub const DIM: &str = "\x1b[38;5;243m";
+    // Content text — lighter grey
+    pub const LIGHT: &str = "\x1b[38;5;250m";
+    // Tool names — soft blue
+    pub const TOOL: &str = "\x1b[38;5;111m";
+    // Thinking — soft purple
+    pub const THINKING: &str = "\x1b[38;5;183m";
+    // Tool result — soft green
+    pub const RESULT: &str = "\x1b[38;5;151m";
+    // Message/prompt — soft yellow
+    pub const PROMPT: &str = "\x1b[38;5;223m";
+    // Launch command — soft cyan
+    pub const CMD: &str = "\x1b[38;5;152m";
+    // Separator — very dim
+    pub const SEP: &str = "\x1b[38;5;238m";
+    // Reset
+    pub const RESET: &str = "\x1b[0m";
+}
 
 /// Claude Code CLI provider adapter.
 ///
-/// Implements the `AgentSession` trait by driving the `claude` CLI subprocess.
-/// Each message is sent as a separate `claude -p <message>` invocation that
-/// shares the same `--session-id` for conversation continuity across the
-/// entire test run.
+/// Implements the `AgentSession` trait by driving a single long-lived `claude`
+/// CLI subprocess. Messages are sent as JSON to stdin and responses are streamed
+/// as JSON from stdout, eliminating per-step process spawn overhead.
 pub struct ClaudeCodeAdapter {
     /// Path to the claude CLI binary.
     binary_path: PathBuf,
-    /// Session ID for conversation continuity across messages.
-    session_id: String,
     /// Extra agent arguments from config.
     agent_args: Vec<String>,
-    /// Artifact directory for transcript storage (used in future stories for transcript capture).
+    /// Artifact directory for transcript storage.
     #[allow(dead_code)]
     artifact_dir: PathBuf,
-    /// Whether the session has been started.
-    started: bool,
-    /// Whether the first message has been sent (switches from --session-id to --resume).
-    session_created: bool,
+    /// Whether verbose output is enabled.
+    verbose: bool,
+    /// Bootstrap content to pass as --append-system-prompt at launch.
+    bootstrap_content: Option<String>,
+    /// The long-lived claude subprocess.
+    child: Option<Child>,
+    /// Stdin handle for sending messages.
+    stdin: Option<ChildStdin>,
+    /// Buffered reader for stdout.
+    reader: Option<BufReader<std::process::ChildStdout>>,
 }
 
 /// Format a step message with metadata prefix for sending to the provider.
@@ -43,7 +68,7 @@ pub(crate) fn format_step_message(message: &StepMessage) -> String {
 struct StreamEvent {
     #[serde(rename = "type")]
     event_type: String,
-    /// Present on "assistant" events — contains content blocks.
+    /// Present on "assistant" and "user" (tool_result) events.
     #[serde(default)]
     message: Option<AssistantMessage>,
     /// Present on "result" events — the final text result.
@@ -68,6 +93,30 @@ struct ContentBlock {
     block_type: String,
     #[serde(default)]
     text: Option<String>,
+    /// Tool use fields
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    /// Thinking content
+    #[serde(default)]
+    thinking: Option<String>,
+    /// Tool result content (string form)
+    #[serde(default)]
+    content: Option<serde_json::Value>,
+    /// Tool use input arguments
+    #[serde(default)]
+    input: Option<serde_json::Value>,
+}
+
+/// Format a user message as stream-json input for the Claude CLI.
+fn format_stream_input(content: &str) -> String {
+    // Escape the content for JSON embedding
+    let escaped = serde_json::to_string(content).unwrap_or_else(|_| format!("\"{}\"", content));
+    format!(
+        r#"{{"type":"user","message":{{"role":"user","content":{}}}}}"#,
+        escaped
+    )
 }
 
 impl ClaudeCodeAdapter {
@@ -78,79 +127,130 @@ impl ClaudeCodeAdapter {
         })
     }
 
-    /// Build the command for sending a message to the Claude Code CLI.
-    ///
-    /// The first message uses `--session-id` to create a new session.
-    /// Subsequent messages use `--resume` to continue the existing session.
-    fn build_command(&self, message: &str) -> Command {
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.arg("-p").arg(message);
-
-        if self.session_created {
-            cmd.arg("--resume").arg(&self.session_id);
-        } else {
-            cmd.arg("--session-id").arg(&self.session_id);
+    /// Spawn the claude process if not already running.
+    fn ensure_started(&mut self) -> Result<(), ProviderError> {
+        if self.child.is_some() {
+            return Ok(());
         }
 
-        cmd.arg("--output-format").arg("stream-json");
+        tracing::info!("spawning long-lived claude process");
+
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.arg("-p")
+            .arg("--input-format")
+            .arg("stream-json")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--no-session-persistence");
 
         for arg in &self.agent_args {
             cmd.arg(arg);
         }
 
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd
+        // Write bootstrap to a temp file and pass via --append-system-prompt-file
+        // This avoids issues with multi-line content in CLI arguments.
+        if let Some(ref bootstrap) = self.bootstrap_content {
+            let prompt_path = self.artifact_dir.join("bootstrap_prompt.txt");
+            std::fs::write(&prompt_path, bootstrap).map_err(|e| {
+                ProviderError::StartFailed(format!("failed to write bootstrap prompt file: {e}"))
+            })?;
+            cmd.arg("--append-system-prompt-file").arg(&prompt_path);
+        }
+
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if self.verbose {
+            let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+            eprintln!("{}[verbose]{} {}launch:{} {} {}{}", color::DIM, color::RESET, color::DIM, color::RESET, color::CMD, args.join(" "), color::RESET);
+            eprintln!("{}         binary: {}{}", color::DIM, cmd.get_program().to_string_lossy(), color::RESET);
+        }
+
+        let mut child = cmd.spawn().map_err(|e| {
+            ProviderError::StartFailed(format!("failed to spawn claude CLI: {e}"))
+        })?;
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            ProviderError::StartFailed("failed to capture stdin".to_string())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ProviderError::StartFailed("failed to capture stdout".to_string())
+        })?;
+
+        self.child = Some(child);
+        self.stdin = Some(stdin);
+        self.reader = Some(BufReader::new(stdout));
+
+        tracing::info!("claude-code long-lived process started");
+        Ok(())
     }
 
-    /// Spawn a claude subprocess for a message and return a streaming iterator.
+    /// Send a message to the long-lived process and return a streaming iterator.
     fn send_message(
         &mut self,
         message: &str,
     ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
     {
-        if !self.started {
-            return Err(ProviderError::SendFailed("session not started".to_string()));
+        self.ensure_started()?;
+
+        let stdin = self.stdin.as_mut().ok_or_else(|| {
+            ProviderError::SendFailed("session not started".to_string())
+        })?;
+
+        let input_line = format_stream_input(message);
+
+        if self.verbose {
+            eprintln!("{}[verbose]{} {}prompt ({} bytes):{}", color::DIM, color::RESET, color::DIM, message.len(), color::RESET);
+            eprintln!("{}{}{}", color::PROMPT, message, color::RESET);
+            eprintln!("{}───{}", color::SEP, color::RESET);
         }
 
-        let mut cmd = self.build_command(message);
-        let child = cmd
-            .spawn()
-            .map_err(|e| ProviderError::SendFailed(format!("failed to spawn claude CLI: {e}")))?;
+        stdin
+            .write_all(input_line.as_bytes())
+            .map_err(|e| ProviderError::SendFailed(format!("failed to write to stdin: {e}")))?;
+        stdin
+            .write_all(b"\n")
+            .map_err(|e| ProviderError::SendFailed(format!("failed to write newline: {e}")))?;
+        stdin
+            .flush()
+            .map_err(|e| ProviderError::SendFailed(format!("failed to flush stdin: {e}")))?;
 
-        // After the first message spawns, subsequent messages use --resume
-        self.session_created = true;
+        let reader = self.reader.as_mut().ok_or_else(|| {
+            ProviderError::SendFailed("stdout reader not available".to_string())
+        })?;
 
-        Ok(Box::new(ClaudeCodeStreamIterator::new(child)))
+        Ok(Box::new(StreamTurnIterator { reader, done: false, verbose: self.verbose }))
     }
 }
 
 impl AgentSession for ClaudeCodeAdapter {
-    fn initialize(config: &Config, artifact_dir: &Path) -> Result<Self, ProviderError>
+    fn initialize(config: &Config, artifact_dir: &Path, verbose: bool) -> Result<Self, ProviderError>
     where
         Self: Sized,
     {
         tracing::info!(provider = "claude-code", "initializing provider");
         let binary_path = Self::find_binary()?;
-        let session_id = uuid::Uuid::new_v4().to_string();
         tracing::info!(
             binary = %binary_path.display(),
-            session_id = %session_id,
             "claude-code provider initialized"
         );
 
         Ok(Self {
             binary_path,
-            session_id,
             agent_args: config.provider.agent_args.clone(),
             artifact_dir: artifact_dir.to_path_buf(),
-            started: false,
-            session_created: false,
+            verbose,
+            bootstrap_content: None,
+            child: None,
+            stdin: None,
+            reader: None,
         })
     }
 
     fn start(&mut self) -> Result<(), ProviderError> {
-        tracing::info!("claude-code session started");
-        self.started = true;
+        // Process is spawned lazily on first send_step, after bootstrap content is available.
+        tracing::info!("claude-code session ready (process will launch on first message)");
         Ok(())
     }
 
@@ -159,7 +259,14 @@ impl AgentSession for ClaudeCodeAdapter {
         message: BootstrapMessage,
     ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
     {
-        self.send_message(&message.content)
+        // Store bootstrap content — it will be passed as --append-system-prompt at launch.
+        // If the process is already running, send as a regular message (shouldn't happen in normal flow).
+        if self.child.is_some() {
+            return self.send_message(&message.content);
+        }
+        self.bootstrap_content = Some(message.content);
+        // Return an empty iterator since no API call is made
+        Ok(Box::new(std::iter::once(Ok(OutputChunk::Done))))
     }
 
     fn send_step(
@@ -172,34 +279,39 @@ impl AgentSession for ClaudeCodeAdapter {
     }
 
     fn close(&mut self) -> Result<(), ProviderError> {
-        self.started = false;
+        tracing::info!("closing claude-code session");
+
+        // Drop stdin to signal EOF — the process will exit
+        self.stdin.take();
+        self.reader.take();
+
+        if let Some(mut child) = self.child.take() {
+            match child.wait() {
+                Ok(status) => {
+                    tracing::info!(exit_status = %status, "claude process exited");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to wait for claude process");
+                }
+            }
+        }
+
         Ok(())
     }
 }
 
-/// Iterator that streams output from a Claude Code CLI subprocess.
+/// Iterator that reads one turn of streamed output from the long-lived process.
 ///
-/// Reads JSONL (stream-json) from the child's stdout, parsing each line
-/// into `OutputChunk` values. Yields `OutputChunk::Done` when the process
-/// exits, and reports errors if the process fails.
-struct ClaudeCodeStreamIterator {
-    reader: BufReader<std::process::ChildStdout>,
-    child: Child,
+/// Reads JSONL from stdout, parsing each line into `OutputChunk` values.
+/// Yields `OutputChunk::Done` when a `result` event is received (turn complete).
+/// The process stays alive for the next message.
+struct StreamTurnIterator<'a> {
+    reader: &'a mut BufReader<std::process::ChildStdout>,
     done: bool,
+    verbose: bool,
 }
 
-impl ClaudeCodeStreamIterator {
-    fn new(mut child: Child) -> Self {
-        let stdout = child.stdout.take().expect("stdout was piped");
-        Self {
-            reader: BufReader::new(stdout),
-            child,
-            done: false,
-        }
-    }
-}
-
-impl Iterator for ClaudeCodeStreamIterator {
+impl<'a> Iterator for StreamTurnIterator<'a> {
     type Item = Result<OutputChunk, ProviderError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -211,34 +323,11 @@ impl Iterator for ClaudeCodeStreamIterator {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => {
-                    // EOF — process finished, check exit status
+                    // EOF — process exited unexpectedly
                     self.done = true;
-                    match self.child.wait() {
-                        Ok(status) if status.success() => {
-                            return Some(Ok(OutputChunk::Done));
-                        }
-                        Ok(status) => {
-                            // Collect stderr for the error message
-                            let stderr_msg = self
-                                .child
-                                .stderr
-                                .take()
-                                .map(|s| {
-                                    let mut buf = String::new();
-                                    BufReader::new(s).read_to_string(&mut buf).ok();
-                                    buf
-                                })
-                                .unwrap_or_default();
-                            return Some(Err(ProviderError::SessionCrashed(format!(
-                                "claude CLI exited with {status}: {stderr_msg}"
-                            ))));
-                        }
-                        Err(e) => {
-                            return Some(Err(ProviderError::SessionCrashed(format!(
-                                "failed to wait for claude CLI: {e}"
-                            ))));
-                        }
-                    }
+                    return Some(Err(ProviderError::SessionCrashed(
+                        "claude process exited unexpectedly".to_string(),
+                    )));
                 }
                 Ok(_) => {
                     let trimmed = line.trim();
@@ -251,11 +340,64 @@ impl Iterator for ClaudeCodeStreamIterator {
                             "assistant" => {
                                 if let Some(msg) = &event.message {
                                     for block in &msg.content {
-                                        if block.block_type == "text" {
-                                            if let Some(text) = &block.text {
-                                                if !text.is_empty() {
-                                                    return Some(Ok(OutputChunk::Text(text.clone())));
+                                        match block.block_type.as_str() {
+                                            "text" => {
+                                                if let Some(text) = &block.text {
+                                                    if !text.is_empty() {
+                                                        return Some(Ok(OutputChunk::Text(
+                                                            text.clone(),
+                                                        )));
+                                                    }
                                                 }
+                                            }
+                                            "tool_use" => {
+                                                if self.verbose {
+                                                    let name = block.name.as_deref().unwrap_or("unknown");
+                                                    let input_preview = block.input.as_ref().map(|v| {
+                                                        // For Bash, show the command directly
+                                                        if let Some(cmd) = v.get("command").and_then(|c| c.as_str()) {
+                                                            format!("$ {cmd}")
+                                                        } else if let Some(path) = v.get("file_path").and_then(|p| p.as_str()) {
+                                                            path.to_string()
+                                                        } else if let Some(pattern) = v.get("pattern").and_then(|p| p.as_str()) {
+                                                            format!("/{pattern}/")
+                                                        } else {
+                                                            v.to_string()
+                                                        }
+                                                    }).unwrap_or_default();
+                                                    eprintln!("{}[verbose]{} {}tool:{} {}{}{} {}{}{}", color::DIM, color::RESET, color::DIM, color::RESET, color::TOOL, name, color::RESET, color::LIGHT, input_preview, color::RESET);
+                                                }
+                                            }
+                                            "thinking" => {
+                                                if self.verbose {
+                                                    if let Some(thinking) = &block.thinking {
+                                                        eprintln!("{}[verbose]{} {}thinking:{}", color::DIM, color::RESET, color::DIM, color::RESET);
+                                                        eprintln!("{}{}{}", color::THINKING, thinking, color::RESET);
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            "user" => {
+                                // Tool results — log in verbose mode
+                                if self.verbose {
+                                    if let Some(msg) = &event.message {
+                                        for block in &msg.content {
+                                            if block.block_type == "tool_result" {
+                                                let result_text = block.content
+                                                    .as_ref()
+                                                    .map(|v| match v {
+                                                        serde_json::Value::String(s) => s.clone(),
+                                                        other => other.to_string(),
+                                                    })
+                                                    .or_else(|| block.text.clone())
+                                                    .unwrap_or_default();
+                                                eprintln!("{}[verbose]{} {}result:{}", color::DIM, color::RESET, color::DIM, color::RESET);
+                                                eprintln!("{}{}{}", color::RESULT, result_text, color::RESET);
                                             }
                                         }
                                     }
@@ -270,14 +412,11 @@ impl Iterator for ClaudeCodeStreamIterator {
                                 return Some(Err(ProviderError::StreamError(msg)));
                             }
                             "result" => {
-                                if let Some(text) = &event.result {
-                                    if !text.is_empty() {
-                                        return Some(Ok(OutputChunk::Text(text.clone())));
-                                    }
-                                }
-                                continue;
+                                // Turn complete — text was already streamed via assistant events
+                                self.done = true;
+                                return Some(Ok(OutputChunk::Done));
                             }
-                            // Skip system, tool_use, and other event types
+                            // Skip system (inter-turn init), rate_limit_event, etc.
                             _ => continue,
                         },
                         Err(_) => {
@@ -296,9 +435,6 @@ impl Iterator for ClaudeCodeStreamIterator {
         }
     }
 }
-
-/// Use `std::io::Read::read_to_string` for reading stderr.
-use std::io::Read;
 
 #[cfg(test)]
 mod tests {
@@ -321,117 +457,40 @@ mod tests {
     }
 
     #[test]
-    fn build_command_includes_session_id_and_output_format() {
-        let adapter = ClaudeCodeAdapter {
-            binary_path: PathBuf::from("/usr/bin/claude"),
-            session_id: "test-session-123".to_string(),
-            agent_args: vec![],
-            artifact_dir: PathBuf::from("/tmp/artifacts"),
-            started: true,
-            session_created: false,
-        };
-
-        let cmd = adapter.build_command("hello world");
-        let args: Vec<_> = cmd.get_args().collect();
-
-        assert_eq!(cmd.get_program(), "/usr/bin/claude");
-        assert!(args.contains(&std::ffi::OsStr::new("-p")));
-        assert!(args.contains(&std::ffi::OsStr::new("hello world")));
-        assert!(args.contains(&std::ffi::OsStr::new("--session-id")));
-        assert!(args.contains(&std::ffi::OsStr::new("test-session-123")));
-        assert!(args.contains(&std::ffi::OsStr::new("--output-format")));
-        assert!(args.contains(&std::ffi::OsStr::new("stream-json")));
-    }
-
-    #[test]
-    fn build_command_uses_resume_after_first_message() {
-        let adapter = ClaudeCodeAdapter {
-            binary_path: PathBuf::from("/usr/bin/claude"),
-            session_id: "test-session-123".to_string(),
-            agent_args: vec![],
-            artifact_dir: PathBuf::from("/tmp/artifacts"),
-            started: true,
-            session_created: true,
-        };
-
-        let cmd = adapter.build_command("step 2");
-        let args: Vec<_> = cmd.get_args().collect();
-
-        assert!(args.contains(&std::ffi::OsStr::new("--resume")));
-        assert!(args.contains(&std::ffi::OsStr::new("test-session-123")));
-        assert!(!args.contains(&std::ffi::OsStr::new("--session-id")));
-    }
-
-    #[test]
-    fn build_command_includes_agent_args() {
-        let adapter = ClaudeCodeAdapter {
-            binary_path: PathBuf::from("/usr/bin/claude"),
-            session_id: "test-session".to_string(),
-            agent_args: vec!["--model".to_string(), "opus".to_string()],
-            artifact_dir: PathBuf::from("/tmp/artifacts"),
-            started: true,
-            session_created: false,
-        };
-
-        let cmd = adapter.build_command("test");
-        let args: Vec<_> = cmd.get_args().collect();
-
-        assert!(args.contains(&std::ffi::OsStr::new("--model")));
-        assert!(args.contains(&std::ffi::OsStr::new("opus")));
-    }
-
-    #[test]
-    fn build_command_never_includes_system_prompt() {
-        let adapter = ClaudeCodeAdapter {
-            binary_path: PathBuf::from("/usr/bin/claude"),
-            session_id: "test-session".to_string(),
-            agent_args: vec![],
-            artifact_dir: PathBuf::from("/tmp/artifacts"),
-            started: true,
-            session_created: false,
-        };
-
-        let cmd = adapter.build_command("test");
-        let args: Vec<_> = cmd.get_args().collect();
-
-        // System prompt now goes through bootstrap message, not CLI flag
-        assert!(!args.contains(&std::ffi::OsStr::new("--system-prompt")));
-    }
-
-    #[test]
-    fn send_message_fails_before_start() {
+    fn send_message_fails_with_bad_binary() {
         let mut adapter = ClaudeCodeAdapter {
-            binary_path: PathBuf::from("/usr/bin/claude"),
-            session_id: "test-session".to_string(),
+            binary_path: PathBuf::from("/nonexistent/claude"),
             agent_args: vec![],
             artifact_dir: PathBuf::from("/tmp/artifacts"),
-            started: false,
-            session_created: false,
+            child: None,
+            stdin: None,
+            reader: None,
+            verbose: false,
+            bootstrap_content: None,
         };
 
         let result = adapter.send_message("hello");
-        match result {
-            Err(ProviderError::SendFailed(msg)) => {
-                assert!(msg.contains("session not started"));
-            }
-            Err(e) => panic!("expected SendFailed, got: {e:?}"),
-            Ok(_) => panic!("expected error, got Ok"),
-        }
+        assert!(result.is_err(), "expected error with nonexistent binary");
     }
 
     #[test]
-    fn close_resets_started_flag() {
+    fn close_cleans_up_handles() {
         let mut adapter = ClaudeCodeAdapter {
             binary_path: PathBuf::from("/usr/bin/claude"),
-            session_id: "test-session".to_string(),
             agent_args: vec![],
             artifact_dir: PathBuf::from("/tmp/artifacts"),
-            started: true,
-            session_created: false,
+            child: None,
+            stdin: None,
+            reader: None,
+            verbose: false,
+            bootstrap_content: None,
         };
 
+        // Close with no process should succeed
         adapter.close().unwrap();
-        assert!(!adapter.started);
+        assert!(adapter.child.is_none());
+        assert!(adapter.stdin.is_none());
+        assert!(adapter.reader.is_none());
     }
 
     #[test]
@@ -460,19 +519,48 @@ mod tests {
     }
 
     #[test]
-    fn stream_iterator_with_mock_process() {
-        // Test the iterator with a subprocess that echoes JSON lines
+    fn format_stream_input_escapes_json() {
+        let input = format_stream_input("hello \"world\"");
+        assert!(input.contains(r#""hello \"world\"""#));
+        assert!(input.contains(r#""type":"user""#));
+        assert!(input.contains(r#""role":"user""#));
+    }
+
+    #[test]
+    fn format_stream_input_handles_newlines() {
+        let input = format_stream_input("line1\nline2");
+        // Should be valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(parsed["type"], "user");
+        assert_eq!(parsed["message"]["role"], "user");
+        assert_eq!(parsed["message"]["content"], "line1\nline2");
+    }
+
+    #[test]
+    fn stream_turn_iterator_with_mock_process() {
+        // Simulate stdout with assistant + result events
         let child = Command::new("sh")
             .arg("-c")
-            .arg(r#"echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"}]}}'; echo '{"type":"assistant","message":{"content":[{"type":"text","text":" world"}]}}'; echo '{"type":"result","result":"Done"}';"#)
+            .arg(r#"echo '{"type":"system","subtype":"init"}'; echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"}]}}'; echo '{"type":"result","result":"Hello","subtype":"success"}';"#)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
 
-        let mut iter = ClaudeCodeStreamIterator::new(child);
-        let mut collected = Vec::new();
+        let stdout = child.stdout.unwrap();
+        let mut reader = BufReader::new(stdout);
 
+        // Skip system init
+        let mut init_line = String::new();
+        reader.read_line(&mut init_line).unwrap();
+
+        let mut iter = StreamTurnIterator {
+            reader: unsafe { &mut *(&mut reader as *mut BufReader<std::process::ChildStdout>) },
+            done: false,
+            verbose: false,
+        };
+
+        let mut collected = Vec::new();
         for item in &mut iter {
             match item {
                 Ok(OutputChunk::Text(text)) => collected.push(text),
@@ -481,43 +569,57 @@ mod tests {
             }
         }
 
-        assert_eq!(collected, vec!["Hello", " world", "Done"]);
+        assert_eq!(collected, vec!["Hello"]);
     }
 
     #[test]
-    fn stream_iterator_handles_process_failure() {
+    fn stream_turn_iterator_reports_error_events() {
         let child = Command::new("sh")
             .arg("-c")
-            .arg("exit 1")
+            .arg(r#"echo '{"type":"error","error":"something went wrong"}'"#)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
 
-        let mut iter = ClaudeCodeStreamIterator::new(child);
-        let result = iter.next();
+        let stdout = child.stdout.unwrap();
+        let mut reader = BufReader::new(stdout);
 
+        let mut iter = StreamTurnIterator {
+            reader: unsafe { &mut *(&mut reader as *mut BufReader<std::process::ChildStdout>) },
+            done: false,
+            verbose: false,
+        };
+
+        let result = iter.next();
         assert!(result.is_some());
         let item = result.unwrap();
         assert!(
-            matches!(item, Err(ProviderError::SessionCrashed(_))),
-            "expected SessionCrashed, got: {item:?}"
+            matches!(item, Err(ProviderError::StreamError(ref msg)) if msg == "something went wrong"),
+            "expected StreamError, got: {item:?}"
         );
     }
 
     #[test]
-    fn stream_iterator_skips_non_json_lines() {
+    fn stream_turn_iterator_skips_non_json_lines() {
         let child = Command::new("sh")
             .arg("-c")
-            .arg(r#"echo 'not json'; echo '{"type":"assistant","message":{"content":[{"type":"text","text":"text"}]}}'; echo 'also not json'"#)
+            .arg(r#"echo 'not json'; echo '{"type":"assistant","message":{"content":[{"type":"text","text":"text"}]}}'; echo '{"type":"result","result":"text","subtype":"success"}';"#)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
 
-        let mut iter = ClaudeCodeStreamIterator::new(child);
-        let mut texts = Vec::new();
+        let stdout = child.stdout.unwrap();
+        let mut reader = BufReader::new(stdout);
 
+        let mut iter = StreamTurnIterator {
+            reader: unsafe { &mut *(&mut reader as *mut BufReader<std::process::ChildStdout>) },
+            done: false,
+            verbose: false,
+        };
+
+        let mut texts = Vec::new();
         for item in &mut iter {
             match item {
                 Ok(OutputChunk::Text(t)) => texts.push(t),
@@ -530,40 +632,14 @@ mod tests {
     }
 
     #[test]
-    fn stream_iterator_reports_error_events() {
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(r#"echo '{"type":"error","error":"something went wrong"}'"#)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-
-        let mut iter = ClaudeCodeStreamIterator::new(child);
-        let result = iter.next();
-
-        assert!(result.is_some());
-        let item = result.unwrap();
-        assert!(
-            matches!(item, Err(ProviderError::StreamError(ref msg)) if msg == "something went wrong"),
-            "expected StreamError, got: {item:?}"
-        );
-    }
-
-    #[test]
-    fn initialize_fails_without_claude_binary() {
-        // Use a config with a nonexistent provider — initialization should still
-        // attempt to find the `claude` binary. If it's not in PATH, this fails.
-        // We can't guarantee `claude` is NOT in PATH, so we test the struct directly.
+    fn initialize_finds_binary() {
         let config = test_config();
         let tmp = tempfile::tempdir().unwrap();
 
-        // This test verifies the initialize path works when `claude` is in PATH.
-        // If it's not in PATH, we verify the error message.
-        let result = ClaudeCodeAdapter::initialize(&config, tmp.path());
+        let result = ClaudeCodeAdapter::initialize(&config, tmp.path(), false);
         match result {
             Ok(adapter) => {
-                assert!(!adapter.started);
+                assert!(adapter.child.is_none()); // Not started yet
                 assert_eq!(adapter.agent_args, vec!["--verbose"]);
             }
             Err(ProviderError::InitializationFailed(msg)) => {
@@ -571,22 +647,6 @@ mod tests {
             }
             Err(e) => panic!("unexpected error type: {e:?}"),
         }
-    }
-
-    #[test]
-    fn start_enables_messaging() {
-        let mut adapter = ClaudeCodeAdapter {
-            binary_path: PathBuf::from("/usr/bin/claude"),
-            session_id: "test-session".to_string(),
-            agent_args: vec![],
-            artifact_dir: PathBuf::from("/tmp/artifacts"),
-            started: false,
-            session_created: false,
-        };
-
-        assert!(!adapter.started);
-        adapter.start().unwrap();
-        assert!(adapter.started);
     }
 
     #[test]
@@ -608,7 +668,6 @@ mod tests {
         assert!(formatted.contains("step=3/5"));
         assert!(formatted.contains("source=tests/login.test.toml"));
         assert!(formatted.contains("Check the login page"));
-        // Metadata comes before instruction
         let meta_pos = formatted.find("[run_id=").unwrap();
         let instruction_pos = formatted.find("Check the login page").unwrap();
         assert!(meta_pos < instruction_pos);

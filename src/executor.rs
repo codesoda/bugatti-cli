@@ -168,20 +168,42 @@ impl From<ProviderError> for ExecutorError {
 
 /// Parse the RESULT contract marker from accumulated output text.
 ///
-/// Scans from the end of the text for the last line matching:
+/// Scans from the end of the text for the last occurrence of a RESULT marker.
+///
+/// Matches:
 ///   RESULT OK
 ///   RESULT WARN: <message>
 ///   RESULT ERROR: <message>
 ///
-/// Free-form text before the result marker is allowed.
+/// The marker can appear on its own line or embedded at the end of a line
+/// (agents sometimes omit the newline before the marker).
 pub fn parse_result_marker(text: &str) -> Option<StepVerdict> {
-    // Scan lines in reverse to find the last RESULT marker
+    // First try line-based scan (most common case)
     for line in text.lines().rev() {
         let trimmed = line.trim();
         if let Some(verdict) = try_parse_result_line(trimmed) {
             return Some(verdict);
         }
     }
+
+    // Fallback: scan for RESULT marker embedded anywhere in text.
+    // Find the last occurrence and parse from there.
+    let mut pos = text.len();
+    while pos > 0 {
+        if let Some(idx) = text[..pos].rfind("RESULT ") {
+            let from_marker = &text[idx..];
+            // Take up to the next newline (or end of string)
+            let end = from_marker.find('\n').unwrap_or(from_marker.len());
+            let candidate = from_marker[..end].trim();
+            if let Some(verdict) = try_parse_result_line(candidate) {
+                return Some(verdict);
+            }
+            pos = idx;
+        } else {
+            break;
+        }
+    }
+
     None
 }
 
@@ -317,6 +339,7 @@ pub fn execute_steps(
             content,
         };
 
+        let bootstrap_start = Instant::now();
         match session.send_bootstrap(bootstrap_msg) {
             Ok(stream) => {
                 let mut bootstrap_transcript = String::new();
@@ -342,8 +365,9 @@ pub fn execute_steps(
                     let _ = writeln!(f, "{}", bootstrap_transcript);
                     let _ = writeln!(f);
                 }
-                tracing::info!("bootstrap complete");
-                println!("OK ......... bootstrap");
+                let bootstrap_duration = bootstrap_start.elapsed();
+                tracing::info!(duration_ms = bootstrap_duration.as_millis() as u64, "bootstrap complete");
+                println!("OK ......... bootstrap ({:.1}s)", bootstrap_duration.as_secs_f64());
             }
             Err(e) => {
                 tracing::error!(error = %e, "bootstrap send failed");
@@ -497,6 +521,50 @@ pub fn execute_steps(
 
     // Print final run status
     print_run_summary(&outcomes, total_duration, total_steps);
+
+    // Send teardown message (best-effort, non-fatal)
+    if !interrupted.load(Ordering::Relaxed) {
+        println!("TEARDOWN .. cleaning up");
+        let teardown_msg = StepMessage {
+            run_id: run_id.clone(),
+            session_id: session_id.clone(),
+            step_id: total_steps,
+            total_steps,
+            source_file: "teardown".to_string(),
+            instruction: "All test steps are complete. Close any browsers, tools, or resources you opened during this session.".to_string(),
+        };
+        match session.send_step(teardown_msg) {
+            Ok(stream) => {
+                let teardown_start = Instant::now();
+                let teardown_timeout = Duration::from_secs(30);
+                let mut teardown_transcript = String::new();
+                for chunk in stream {
+                    if teardown_start.elapsed() > teardown_timeout {
+                        tracing::warn!("teardown timed out");
+                        break;
+                    }
+                    match chunk {
+                        Ok(OutputChunk::Text(text)) => teardown_transcript.push_str(&text),
+                        Ok(OutputChunk::Done) => break,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "teardown stream error");
+                            break;
+                        }
+                    }
+                }
+                if let Some(ref mut f) = full_transcript_file {
+                    let _ = writeln!(f, "=== Teardown ===");
+                    let _ = writeln!(f, "{}", teardown_transcript);
+                    let _ = writeln!(f);
+                }
+                println!("OK ......... teardown");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "teardown send failed (non-fatal)");
+                println!("WARN ....... teardown failed: {e}");
+            }
+        }
+    }
 
     // Flush/close the full transcript file
     drop(full_transcript_file);
@@ -723,6 +791,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_result_embedded_in_line() {
+        // Agent omits newline before RESULT marker
+        let text = "Success message confirmed visible.RESULT OK";
+        assert_eq!(parse_result_marker(text), Some(StepVerdict::Ok));
+    }
+
+    #[test]
+    fn parse_result_embedded_with_duplicate() {
+        // Agent emits RESULT OK twice without newlines
+        let text = "Log line.RESULT OKRESULT OK";
+        assert_eq!(parse_result_marker(text), Some(StepVerdict::Ok));
+    }
+
+    #[test]
     fn parse_result_warn_with_extra_whitespace() {
         assert_eq!(
             parse_result_marker("RESULT WARN:   extra spaces  "),
@@ -747,7 +829,7 @@ mod tests {
     }
 
     impl AgentSession for MockSession {
-        fn initialize(_config: &Config, _artifact_dir: &Path) -> Result<Self, ProviderError>
+        fn initialize(_config: &Config, _artifact_dir: &Path, _verbose: bool) -> Result<Self, ProviderError>
         where
             Self: Sized,
         {

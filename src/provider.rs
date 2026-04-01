@@ -51,7 +51,7 @@ pub trait AgentSession {
     /// in `config.provider`.
     ///
     /// `artifact_dir` points to the run's artifact directory for transcript/log storage.
-    fn initialize(config: &Config, artifact_dir: &Path) -> Result<Self, ProviderError>
+    fn initialize(config: &Config, artifact_dir: &Path, verbose: bool) -> Result<Self, ProviderError>
     where
         Self: Sized;
 
