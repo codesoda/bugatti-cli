@@ -23,6 +23,9 @@ pub struct CheckpointConfig {
     pub save: String,
     /// Command to restore a checkpoint (receives BUGATTI_CHECKPOINT_ID and BUGATTI_CHECKPOINT_PATH).
     pub restore: String,
+    /// Timeout in seconds for save/restore commands (default: 120).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Provider-level settings.

@@ -237,34 +237,70 @@ pub fn checkpoint_path(project_root: &Path, checkpoint_id: &str) -> PathBuf {
         .join(checkpoint_id)
 }
 
+/// Default checkpoint command timeout (120 seconds).
+const DEFAULT_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Run a checkpoint save or restore command with BUGATTI_CHECKPOINT_ID and BUGATTI_CHECKPOINT_PATH.
 pub fn run_checkpoint_command(
     cmd: &str,
     checkpoint_id: &str,
     project_root: &Path,
+    timeout_secs: Option<u64>,
 ) -> Result<(), String> {
     let cp_path = checkpoint_path(project_root, checkpoint_id);
     std::fs::create_dir_all(&cp_path)
         .map_err(|e| format!("failed to create checkpoint dir '{}': {e}", cp_path.display()))?;
 
-    let output = Command::new("sh")
+    let timeout = timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_CHECKPOINT_TIMEOUT);
+
+    let mut child = Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .env("BUGATTI_CHECKPOINT_ID", checkpoint_id)
         .env("BUGATTI_CHECKPOINT_PATH", cp_path.display().to_string())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to spawn checkpoint command: {e}"))?;
 
-    if !output.status.success() {
-        print_output_tail("stderr", &output.stderr);
-        print_output_tail("stdout", &output.stdout);
-        return Err(format!(
-            "exited with code {}",
-            output.status.code().unwrap_or(-1)
-        ));
-    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = child.stdout.take().map(|mut s| {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut s, &mut buf).ok();
+                    buf
+                }).unwrap_or_default();
+                let stderr = child.stderr.take().map(|mut s| {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut s, &mut buf).ok();
+                    buf
+                }).unwrap_or_default();
 
-    Ok(())
+                if !status.success() {
+                    print_output_tail("stderr", &stderr);
+                    print_output_tail("stdout", &stdout);
+                    return Err(format!(
+                        "exited with code {}",
+                        status.code().unwrap_or(-1)
+                    ));
+                }
+                return Ok(());
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("timed out after {}s", timeout.as_secs()));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("failed to wait for checkpoint command: {e}")),
+        }
+    }
 }
 
 /// Default timeout for readiness checks (30 seconds).

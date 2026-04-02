@@ -26,19 +26,23 @@ Manual QA doesn't scale. Traditional E2E test frameworks are brittle and expensi
 
 ## Install
 
-### From source (requires Rust)
+### Pre-built binary (macOS arm64)
 
 ```sh
 curl -sSf https://raw.githubusercontent.com/codesoda/bugatti-cli/main/install.sh | sh
 ```
 
-### From a clone
+Downloads the latest release binary from GitHub.
+
+### From a clone (requires Rust)
 
 ```sh
 git clone https://github.com/codesoda/bugatti-cli.git
 cd bugatti-cli
 sh install.sh
 ```
+
+Builds from source with `cargo build --release`.
 
 ## Quick Start
 
@@ -93,6 +97,13 @@ cmd = "npm run db:migrate"
 kind = "long_lived"
 cmd = "npm start"
 readiness_url = "http://localhost:3000/health"
+
+# Multiple readiness URLs and custom timeout
+[commands.docker-stack]
+kind = "long_lived"
+cmd = "docker compose up"
+readiness_urls = ["http://localhost:3000/health", "http://localhost:5432"]
+readiness_timeout_secs = 120
 ```
 
 ### Provider Settings
@@ -111,7 +122,15 @@ readiness_url = "http://localhost:3000/health"
 | Kind | Behavior |
 |------|----------|
 | `short_lived` | Runs to completion before tests start. Fails the run on non-zero exit. |
-| `long_lived` | Spawns in the background. Optional `readiness_url` is polled until ready. Torn down after tests complete. |
+| `long_lived` | Spawns in the background. Optional `readiness_url`/`readiness_urls` polled until ready. Torn down after tests complete. |
+
+#### Long-lived command options
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `readiness_url` | — | Single URL to poll before the command is considered ready |
+| `readiness_urls` | `[]` | Multiple URLs to poll (all must respond) |
+| `readiness_timeout_secs` | `30` | How long to wait for readiness before failing |
 
 ### CLI Flags
 
@@ -133,6 +152,8 @@ Test files are TOML with a `.test.toml` extension. Each step must have exactly o
 | `include_path` | Path to another test file to inline |
 | `include_glob` | Glob pattern to inline multiple test files |
 | `step_timeout_secs` | Per-step timeout override (seconds) |
+| `skip` | If `true`, step is skipped (counts as passed) |
+| `checkpoint` | Checkpoint name — saves state after pass, restores if skipped |
 
 ### Shared Test Files
 
@@ -170,6 +191,90 @@ step_timeout_secs = 600
 base_url = "http://localhost:5000"
 ```
 
+### Skipping Steps
+
+Mark steps as `skip = true` to bypass them during execution. Skipped steps count as passed and show as `SKIP` in the output.
+
+```toml
+[[steps]]
+instruction = "Create account and complete onboarding"
+skip = true
+
+[[steps]]
+instruction = "Verify the dashboard loads correctly"
+```
+
+This is useful for iterative development — run the full suite once, then skip early steps on subsequent runs to focus on later steps.
+
+### Checkpoints
+
+Checkpoints let you save and restore state at step boundaries, enabling fast iteration on long test suites.
+
+**Config** — define save/restore commands in `bugatti.config.toml`:
+
+```toml
+[checkpoint]
+save = "./scripts/checkpoint.sh save"
+restore = "./scripts/checkpoint.sh restore"
+timeout_secs = 180
+```
+
+**Steps** — add `checkpoint = "name"` to steps:
+
+```toml
+[[steps]]
+instruction = "Create account and complete onboarding"
+checkpoint = "after-onboarding"
+
+[[steps]]
+instruction = "Configure billing with test card"
+checkpoint = "after-billing"
+
+[[steps]]
+instruction = "Invite team member"
+```
+
+**How it works:**
+
+1. When a non-skipped step with a checkpoint passes, bugatti runs the **save** command
+2. When skipped steps have checkpoints, bugatti runs the **restore** command for the last checkpoint before the first non-skipped step
+3. If there are skipped steps after the restored checkpoint that lack their own checkpoints, a warning is printed
+
+**Environment variables** passed to save/restore commands:
+
+| Variable | Description |
+|----------|-------------|
+| `BUGATTI_CHECKPOINT_ID` | The checkpoint name (e.g. `after-onboarding`) |
+| `BUGATTI_CHECKPOINT_PATH` | Directory for this checkpoint (`.bugatti/checkpoints/<id>/`) |
+
+**Example checkpoint script:**
+
+```bash
+#!/bin/bash
+set -eu
+action="${1:?usage: checkpoint.sh save|restore}"
+
+case "$action" in
+  save)
+    pg_dump ai_barometer_dev > "$BUGATTI_CHECKPOINT_PATH/db.sql"
+    ;;
+  restore)
+    psql -d ai_barometer_dev < "$BUGATTI_CHECKPOINT_PATH/db.sql"
+    ;;
+esac
+```
+
+**Typical workflow:**
+
+```bash
+# First run — all steps execute, checkpoints saved
+bugatti test ftue.test.toml
+
+# Edit test file: mark steps 1-3 as skip = true
+# Second run — restores checkpoint from step 3, runs step 4 onwards
+bugatti test ftue.test.toml
+```
+
 ## Examples
 
 Working examples in [`examples/`](examples/):
@@ -189,8 +294,9 @@ Working examples in [`examples/`](examples/):
 | `1` | One or more steps failed |
 | `2` | Configuration or parse error |
 | `3` | Provider or readiness failure |
-| `4` | Run interrupted (Ctrl+C) |
-| `5` | Step timed out |
+| `4` | Step timed out |
+| `5` | Run interrupted (Ctrl+C) |
+| `6` | Setup command failed |
 
 ## License
 

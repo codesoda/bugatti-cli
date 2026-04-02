@@ -413,7 +413,7 @@ pub fn execute_steps(
                     }
 
                     println!("RESTORE .... checkpoint \"{cp_id}\"");
-                    if let Err(e) = crate::command::run_checkpoint_command(&cp_config.restore, cp_id, project_root) {
+                    if let Err(e) = crate::command::run_checkpoint_command(&cp_config.restore, cp_id, project_root, cp_config.timeout_secs) {
                         println!("FAIL ....... checkpoint restore: {e}");
                         return Err(ExecutorError::CheckpointFailed(format!(
                             "restore \"{cp_id}\" failed: {e}"
@@ -586,7 +586,7 @@ pub fn execute_steps(
         if !is_failure {
             if let (Some(cp_config), Some(cp_id)) = (checkpoint_config, step.checkpoint.as_deref()) {
                 println!("SAVE ....... checkpoint \"{cp_id}\"");
-                if let Err(e) = crate::command::run_checkpoint_command(&cp_config.save, cp_id, project_root) {
+                if let Err(e) = crate::command::run_checkpoint_command(&cp_config.save, cp_id, project_root, cp_config.timeout_secs) {
                     println!("FAIL ....... checkpoint save: {e}");
                     return Err(ExecutorError::CheckpointFailed(format!(
                         "save \"{cp_id}\" failed: {e}"
