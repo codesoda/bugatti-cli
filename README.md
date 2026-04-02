@@ -139,6 +139,7 @@ readiness_timeout_secs = 120
 | `--strict-warnings` | Treat WARN results as failures (overrides config) |
 | `--skip-cmd <name>` | Skip a configured command |
 | `--skip-readiness <name>` | Skip readiness check for a command |
+| `--from-checkpoint <name>` | Resume from a named checkpoint (auto-skips earlier steps, restores state) |
 
 ## Test Files
 
@@ -424,6 +425,23 @@ instruction = "Create account via signup form"
 
 Or remove the `[checkpoint]` section from `bugatti.config.toml` — steps with `checkpoint` will be ignored if no save/restore commands are configured.
 
+#### Resuming from a checkpoint via CLI
+
+Instead of manually adding `skip = true` to steps, use `--from-checkpoint`:
+
+```bash
+# Resume from the "after-billing" checkpoint — skips steps 1-3 automatically
+bugatti test ftue.test.toml --from-checkpoint after-billing
+```
+
+This auto-skips all steps up to and including the step with `checkpoint = "after-billing"`, restores the checkpoint, and executes the remaining steps. No need to edit the TOML file.
+
+If the checkpoint name doesn't exist, bugatti lists the available checkpoints:
+
+```
+ERROR: checkpoint "typo" not found. Available: after-signup, after-onboarding, after-billing
+```
+
 #### Typical workflow
 
 ```bash
@@ -432,12 +450,10 @@ bugatti test ftue.test.toml
 
 # 2. Step 4 fails. Fix the code.
 
-# 3. Edit ftue.test.toml — add skip = true to steps 1-3
+# 3. Re-run from the last checkpoint before step 4
+bugatti test ftue.test.toml --from-checkpoint after-billing
 
-# 4. Re-run — restores checkpoint from step 3, runs step 4+ against saved state
-bugatti test ftue.test.toml
-
-# 5. Step 4 passes now. Remove skip = true from steps 1-3 for the final run.
+# 4. Step 4 passes. Do a clean run to confirm everything works end-to-end.
 bugatti test ftue.test.toml
 ```
 

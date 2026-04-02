@@ -72,7 +72,7 @@ fn main() {
     println!();
 
     let code = match cli.command {
-        Commands::Test { path, skip_cmds, skip_readiness, strict_warnings, verbose } => {
+        Commands::Test { path, skip_cmds, skip_readiness, strict_warnings, from_checkpoint, verbose } => {
             let project_root = std::env::current_dir().unwrap_or_else(|e| {
                 eprintln!("ERROR: failed to determine current directory: {e}");
                 std::process::exit(EXIT_CONFIG_ERROR);
@@ -88,7 +88,7 @@ fn main() {
                         eprintln!("ERROR: test file not found: {p}");
                         EXIT_CONFIG_ERROR
                     } else {
-                        let result = run_test_pipeline(&project_root, &test_path, &skip_cmds, &skip_readiness, strict_warnings, verbose);
+                        let result = run_test_pipeline(&project_root, &test_path, &skip_cmds, &skip_readiness, strict_warnings, from_checkpoint.as_deref(), verbose);
                         // Print run reference for single-file mode
                         if let Some(run_id) = &result.run_id {
                             println!("\nRun ID: {run_id}");
@@ -104,7 +104,7 @@ fn main() {
                         result.exit_code
                     }
                 }
-                None => run_discovery(&project_root, &skip_cmds, &skip_readiness, strict_warnings, verbose),
+                None => run_discovery(&project_root, &skip_cmds, &skip_readiness, strict_warnings, from_checkpoint.as_deref(), verbose),
             }
         }
     };
@@ -116,7 +116,7 @@ fn main() {
 ///
 /// Pipeline order: config load -> parse -> expand -> artifact setup -> command setup
 /// -> provider init -> step execution -> report -> teardown -> exit
-fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool, verbose: bool) -> TestRunResult {
+fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool, from_checkpoint: Option<&str>, verbose: bool) -> TestRunResult {
     let test_name_fallback = test_path.display().to_string();
 
     // Phase 1: Load config
@@ -219,6 +219,7 @@ fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String]
         skip_cmds,
         skip_readiness,
         strict_warnings: effective_strict_warnings,
+        from_checkpoint,
         effective: &effective,
         run_id: &run_id,
         session_id: &session_id,
@@ -238,6 +239,7 @@ struct PipelineContext<'a> {
     skip_cmds: &'a [String],
     skip_readiness: &'a [String],
     strict_warnings: bool,
+    from_checkpoint: Option<&'a str>,
     effective: &'a bugatti::config::Config,
     run_id: &'a bugatti::run::RunId,
     session_id: &'a bugatti::run::SessionId,
@@ -310,7 +312,7 @@ impl<'a> PipelineContext<'a> {
 
 /// Continue the pipeline after artifact setup. Ensures best-effort report writing
 /// and subprocess teardown even on failure.
-fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::ExpandedStep>) -> TestRunResult {
+fn run_test_with_artifacts(ctx: &PipelineContext, mut steps: Vec<bugatti::expand::ExpandedStep>) -> TestRunResult {
     // Phase 7: Initialize tracing
     let _tracing_guard = match diagnostics::init_tracing(ctx.artifact_dir) {
         Ok(g) => Some(g),
@@ -340,6 +342,40 @@ fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::Ex
     println!("  {dim}Artifacts:{reset}");
     println!("  {}", relative_display(&ctx.artifact_dir.root));
     println!();
+
+    // Apply --from-checkpoint: auto-skip steps up to and including the checkpoint step
+    if let Some(cp_name) = ctx.from_checkpoint {
+        if ctx.effective.checkpoint.is_none() {
+            let mut no_processes = vec![];
+            return ctx.fail_early(
+                EXIT_CONFIG_ERROR,
+                format!("--from-checkpoint \"{cp_name}\" requires a [checkpoint] section in bugatti.config.toml"),
+                &mut no_processes,
+            );
+        }
+        let cp_step_idx = steps.iter().position(|s| s.checkpoint.as_deref() == Some(cp_name));
+        match cp_step_idx {
+            Some(idx) => {
+                println!("  {dim}Checkpoint:{reset} resuming from \"{cp_name}\" (skipping steps 1-{}){reset}", idx + 1);
+                println!();
+                for step in steps[..=idx].iter_mut() {
+                    step.skip = true;
+                }
+            }
+            None => {
+                let available: Vec<&str> = steps.iter()
+                    .filter_map(|s| s.checkpoint.as_deref())
+                    .collect();
+                let mut no_processes = vec![];
+                let msg = if available.is_empty() {
+                    format!("checkpoint \"{cp_name}\" not found — no steps have checkpoint fields")
+                } else {
+                    format!("checkpoint \"{cp_name}\" not found. Available: {}", available.join(", "))
+                };
+                return ctx.fail_early(EXIT_CONFIG_ERROR, msg, &mut no_processes);
+            }
+        }
+    }
 
     let mut no_processes = vec![];
 
@@ -453,7 +489,7 @@ fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::Ex
 
 /// Discover and run all root test files, printing an aggregate summary.
 /// Returns the aggregate exit code.
-fn run_discovery(project_root: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool, verbose: bool) -> i32 {
+fn run_discovery(project_root: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool, from_checkpoint: Option<&str>, verbose: bool) -> i32 {
     println!("Discovering root test files...");
 
     let discovery = match discover_root_tests(project_root) {
@@ -503,7 +539,7 @@ fn run_discovery(project_root: &Path, skip_cmds: &[String], skip_readiness: &[St
             });
             continue;
         }
-        let result = run_single_test(test, project_root, skip_cmds, skip_readiness, strict_warnings, verbose);
+        let result = run_single_test(test, project_root, skip_cmds, skip_readiness, strict_warnings, from_checkpoint, verbose);
         results.push(result);
     }
 
@@ -535,13 +571,14 @@ fn run_single_test(
     skip_cmds: &[String],
     skip_readiness: &[String],
     strict_warnings: bool,
+    from_checkpoint: Option<&str>,
     verbose: bool,
 ) -> TestRunResult {
     println!("═══════════════════════════════════════════════════════");
     println!("Running: {} ({})", test.name, relative_display(&test.path));
     println!("═══════════════════════════════════════════════════════");
 
-    let result = run_test_pipeline(project_root, &test.path, skip_cmds, skip_readiness, strict_warnings, verbose);
+    let result = run_test_pipeline(project_root, &test.path, skip_cmds, skip_readiness, strict_warnings, from_checkpoint, verbose);
 
     if let Some(err) = &result.error {
         eprintln!("  ERROR: {err}");
