@@ -256,10 +256,10 @@ action="${1:?usage: checkpoint.sh save|restore}"
 
 case "$action" in
   save)
-    pg_dump ai_barometer_dev > "$BUGATTI_CHECKPOINT_PATH/db.sql"
+    pg_dump myapp_dev > "$BUGATTI_CHECKPOINT_PATH/db.sql"
     ;;
   restore)
-    psql -d ai_barometer_dev < "$BUGATTI_CHECKPOINT_PATH/db.sql"
+    psql -d myapp_dev < "$BUGATTI_CHECKPOINT_PATH/db.sql"
     ;;
 esac
 ```
