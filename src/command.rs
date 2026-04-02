@@ -196,6 +196,9 @@ fn execute_short_lived(
 
     if !output.status.success() {
         tracing::error!(command = name, exit_code = ?exit_code, "short-lived command failed");
+        // Print last lines of output so the user can see what went wrong
+        print_output_tail("stderr", &output.stderr);
+        print_output_tail("stdout", &output.stdout);
         return Err(CommandError::NonZeroExit {
             name: name.to_string(),
             exit_code,
@@ -210,6 +213,20 @@ fn execute_short_lived(
         stdout_path: stdout_path.display().to_string(),
         stderr_path: stderr_path.display().to_string(),
     })
+}
+
+/// Print the last non-empty lines of command output, prefixed with a label.
+fn print_output_tail(label: &str, output: &[u8]) {
+    let text = String::from_utf8_lossy(output);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return;
+    }
+    let tail: Vec<&str> = lines.into_iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+    println!("  {label}:");
+    for line in tail {
+        println!("    {line}");
+    }
 }
 
 /// Default timeout for readiness checks (30 seconds).
@@ -266,19 +283,23 @@ pub fn spawn_long_lived_commands(
         if skip_cmds.contains(name) {
             println!("SKIP ....... {name} (long-lived)");
             // Readiness checks still run for skipped commands unless explicitly disabled
-            if let Some(ref readiness_url) = def.readiness_url {
+            let urls = def.effective_readiness_urls();
+            if !urls.is_empty() {
                 if skip_readiness.contains(name) {
                     println!("SKIP ....... {name} readiness check (--skip-readiness)");
                 } else {
-                    println!("WAIT ....... {name} (skipped): polling {readiness_url}");
-                    if let Err(e) = poll_readiness(readiness_url, DEFAULT_READINESS_TIMEOUT) {
-                        println!("FAIL ....... {name} (skipped): readiness check failed");
-                        teardown_processes(&mut tracked);
-                        return Err(CommandError::ReadinessFailed {
-                            name: name.to_string(),
-                            url: readiness_url.clone(),
-                            message: e,
-                        });
+                    let timeout = readiness_timeout(def);
+                    for url in &urls {
+                        println!("WAIT ....... {name} (skipped): polling {url}");
+                        if let Err(e) = poll_readiness(url, timeout) {
+                            println!("FAIL ....... {name} (skipped): readiness check failed");
+                            teardown_processes(&mut tracked);
+                            return Err(CommandError::ReadinessFailed {
+                                name: name.to_string(),
+                                url: url.to_string(),
+                                message: e,
+                            });
+                        }
                     }
                     println!("READY ...... {name} (skipped)");
                 }
@@ -325,23 +346,34 @@ pub fn spawn_long_lived_commands(
         tracked.push(process);
 
         // Check readiness if configured
-        if let Some(ref readiness_url) = def.readiness_url {
-            println!("WAIT ....... {name}: polling {readiness_url}");
-            if let Err(e) = poll_readiness(readiness_url, DEFAULT_READINESS_TIMEOUT) {
-                // Readiness failed - tear down what we've started
-                println!("FAIL ....... {name}: readiness check failed");
-                teardown_processes(&mut tracked);
-                return Err(CommandError::ReadinessFailed {
-                    name: name.to_string(),
-                    url: readiness_url.clone(),
-                    message: e,
-                });
+        let urls = def.effective_readiness_urls();
+        if !urls.is_empty() {
+            let timeout = readiness_timeout(def);
+            for url in &urls {
+                println!("WAIT ....... {name}: polling {url}");
+                if let Err(e) = poll_readiness(url, timeout) {
+                    // Readiness failed - tear down what we've started
+                    println!("FAIL ....... {name}: readiness check failed");
+                    teardown_processes(&mut tracked);
+                    return Err(CommandError::ReadinessFailed {
+                        name: name.to_string(),
+                        url: url.to_string(),
+                        message: e,
+                    });
+                }
             }
             println!("READY ...... {name}");
         }
     }
 
     Ok(tracked)
+}
+
+/// Compute the readiness timeout for a command, using the per-command override or the default.
+fn readiness_timeout(def: &CommandDef) -> Duration {
+    def.readiness_timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_READINESS_TIMEOUT)
 }
 
 /// Poll a readiness URL until it responds with a success status or timeout.
@@ -518,6 +550,8 @@ mod tests {
                     kind,
                     cmd: cmd.to_string(),
                     readiness_url: readiness_url.map(String::from),
+                    readiness_urls: Vec::new(),
+                    readiness_timeout_secs: None,
                 },
             );
         }

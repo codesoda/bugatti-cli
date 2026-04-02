@@ -10,6 +10,7 @@
 //! | 3    | Provider startup or readiness check failure |
 //! | 4    | Timeout during step execution |
 //! | 5    | Run was interrupted (Ctrl+C / SIGINT) |
+//! | 6    | Setup command failed (short-lived command exited non-zero) |
 
 /// All steps passed (OK or WARN only).
 pub const EXIT_OK: i32 = 0;
@@ -28,6 +29,9 @@ pub const EXIT_TIMEOUT: i32 = 4;
 
 /// Run was interrupted (Ctrl+C / SIGINT).
 pub const EXIT_INTERRUPTED: i32 = 5;
+
+/// A setup command (short-lived) failed during the setup phase.
+pub const EXIT_SETUP_ERROR: i32 = 6;
 
 use crate::executor::{RunOutcome, StepResult, StepVerdict};
 
@@ -103,6 +107,7 @@ pub fn describe_exit_code(code: i32) -> &'static str {
         EXIT_PROVIDER_ERROR => "provider or readiness failure",
         EXIT_TIMEOUT => "step execution timeout",
         EXIT_INTERRUPTED => "run interrupted",
+        EXIT_SETUP_ERROR => "setup command failed",
         _ => "unknown exit code",
     }
 }

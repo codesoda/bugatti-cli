@@ -221,6 +221,8 @@ mod tests {
                 kind: CommandKind::ShortLived,
                 cmd: "cargo sqlx migrate run".to_string(),
                 readiness_url: None,
+                readiness_urls: Vec::new(),
+                readiness_timeout_secs: None,
             },
         );
         Config {

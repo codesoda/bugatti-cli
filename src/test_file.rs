@@ -46,6 +46,9 @@ pub struct Step {
     pub include_glob: Option<String>,
     /// Optional per-step timeout override in seconds.
     pub step_timeout_secs: Option<u64>,
+    /// If true, this step is skipped during execution (counts as passed).
+    #[serde(default)]
+    pub skip: bool,
 }
 
 /// Error type for test file parsing.
