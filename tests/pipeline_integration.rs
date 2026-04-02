@@ -161,6 +161,8 @@ instruction = "Verify the login form is present"
         &artifact_dir,
         Some(Duration::from_secs(30)),
         None,
+        None,
+        std::path::Path::new("."),
         &std::sync::atomic::AtomicBool::new(false),
     )
     .unwrap();
@@ -302,6 +304,8 @@ instruction = "This step will fail"
         &artifact_dir,
         Some(Duration::from_secs(30)),
         None,
+        None,
+        std::path::Path::new("."),
         &std::sync::atomic::AtomicBool::new(false),
     )
     .unwrap();

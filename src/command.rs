@@ -1,6 +1,6 @@
 use crate::config::{CommandDef, CommandKind, Config};
 use crate::run::ArtifactDir;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -227,6 +227,44 @@ fn print_output_tail(label: &str, output: &[u8]) {
     for line in tail {
         println!("    {line}");
     }
+}
+
+/// Compute the checkpoint directory path for a given ID.
+pub fn checkpoint_path(project_root: &Path, checkpoint_id: &str) -> PathBuf {
+    project_root
+        .join(".bugatti")
+        .join("checkpoints")
+        .join(checkpoint_id)
+}
+
+/// Run a checkpoint save or restore command with BUGATTI_CHECKPOINT_ID and BUGATTI_CHECKPOINT_PATH.
+pub fn run_checkpoint_command(
+    cmd: &str,
+    checkpoint_id: &str,
+    project_root: &Path,
+) -> Result<(), String> {
+    let cp_path = checkpoint_path(project_root, checkpoint_id);
+    std::fs::create_dir_all(&cp_path)
+        .map_err(|e| format!("failed to create checkpoint dir '{}': {e}", cp_path.display()))?;
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .env("BUGATTI_CHECKPOINT_ID", checkpoint_id)
+        .env("BUGATTI_CHECKPOINT_PATH", cp_path.display().to_string())
+        .output()
+        .map_err(|e| format!("failed to spawn checkpoint command: {e}"))?;
+
+    if !output.status.success() {
+        print_output_tail("stderr", &output.stderr);
+        print_output_tail("stdout", &output.stdout);
+        return Err(format!(
+            "exited with code {}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+
+    Ok(())
 }
 
 /// Default timeout for readiness checks (30 seconds).
@@ -558,6 +596,7 @@ mod tests {
         Config {
             provider: ProviderConfig::default(),
             commands: map,
+            checkpoint: None,
         }
     }
 

@@ -235,6 +235,7 @@ mod tests {
                 base_url: None,
             },
             commands,
+            checkpoint: None,
         }
     }
 

@@ -458,6 +458,7 @@ mod tests {
                 base_url: None,
             },
             commands: BTreeMap::new(),
+            checkpoint: None,
         }
     }
 

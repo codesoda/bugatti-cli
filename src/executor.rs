@@ -145,6 +145,8 @@ pub enum ExecutorError {
         path: String,
         source: std::io::Error,
     },
+    /// Checkpoint save or restore failed.
+    CheckpointFailed(String),
 }
 
 impl std::fmt::Display for ExecutorError {
@@ -154,6 +156,7 @@ impl std::fmt::Display for ExecutorError {
             ExecutorError::TranscriptWrite { path, source } => {
                 write!(f, "failed to write transcript to '{path}': {source}")
             }
+            ExecutorError::CheckpointFailed(msg) => write!(f, "checkpoint failed: {msg}"),
         }
     }
 }
@@ -311,6 +314,8 @@ pub fn execute_steps(
     artifact_dir: &ArtifactDir,
     step_timeout: Option<Duration>,
     bootstrap_config: Option<&BootstrapConfig>,
+    checkpoint_config: Option<&crate::config::CheckpointConfig>,
+    project_root: &std::path::Path,
     interrupted: &AtomicBool,
 ) -> Result<RunOutcome, ExecutorError> {
     let timeout = step_timeout.unwrap_or(Duration::from_secs(DEFAULT_STEP_TIMEOUT_SECS));
@@ -381,6 +386,41 @@ pub fn execute_steps(
             Err(e) => {
                 tracing::error!(error = %e, "bootstrap send failed");
                 return Err(ExecutorError::Provider(e));
+            }
+        }
+    }
+
+    // Checkpoint restore: find the last checkpoint among leading skipped steps
+    // and restore it before executing non-skipped steps.
+    if let Some(cp_config) = checkpoint_config {
+        let first_non_skipped = steps.iter().position(|s| !s.skip);
+        if let Some(boundary) = first_non_skipped {
+            if boundary > 0 {
+                // Find the last checkpoint among skipped steps before the boundary
+                let last_cp = steps[..boundary]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(i, s)| s.checkpoint.as_deref().map(|cp| (i, cp)));
+
+                if let Some((cp_step_idx, cp_id)) = last_cp {
+                    let skipped_after = boundary - cp_step_idx - 1;
+                    if skipped_after > 0 {
+                        println!(
+                            "WARN ....... restoring checkpoint \"{}\" from step {}, but {} step(s) after it were also skipped without checkpoints",
+                            cp_id, cp_step_idx + 1, skipped_after
+                        );
+                    }
+
+                    println!("RESTORE .... checkpoint \"{cp_id}\"");
+                    if let Err(e) = crate::command::run_checkpoint_command(&cp_config.restore, cp_id, project_root) {
+                        println!("FAIL ....... checkpoint restore: {e}");
+                        return Err(ExecutorError::CheckpointFailed(format!(
+                            "restore \"{cp_id}\" failed: {e}"
+                        )));
+                    }
+                    println!("OK ......... checkpoint \"{cp_id}\" restored");
+                }
             }
         }
     }
@@ -541,6 +581,20 @@ pub fn execute_steps(
 
         let is_failure = outcome.result.is_failure();
         outcomes.push(outcome);
+
+        // Save checkpoint after a passing step (not on failure)
+        if !is_failure {
+            if let (Some(cp_config), Some(cp_id)) = (checkpoint_config, step.checkpoint.as_deref()) {
+                println!("SAVE ....... checkpoint \"{cp_id}\"");
+                if let Err(e) = crate::command::run_checkpoint_command(&cp_config.save, cp_id, project_root) {
+                    println!("FAIL ....... checkpoint save: {e}");
+                    return Err(ExecutorError::CheckpointFailed(format!(
+                        "save \"{cp_id}\" failed: {e}"
+                    )));
+                }
+                println!("OK ......... checkpoint \"{cp_id}\" saved");
+            }
+        }
 
         // Stop on failure
         if is_failure {
@@ -913,6 +967,7 @@ mod tests {
                 parent_chain: vec![],
                 step_timeout_secs: None,
                 skip: false,
+                checkpoint: None,
             },
             ExpandedStep {
                 step_id: 1,
@@ -922,6 +977,7 @@ mod tests {
                 parent_chain: vec![],
                 step_timeout_secs: None,
                 skip: false,
+                checkpoint: None,
             },
         ]
     }
@@ -970,6 +1026,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1014,6 +1072,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1051,6 +1111,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1084,6 +1146,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1112,6 +1176,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1142,6 +1208,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1174,6 +1242,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1219,6 +1289,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1263,6 +1335,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1295,6 +1369,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1335,6 +1411,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1416,6 +1494,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1447,6 +1527,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1478,6 +1560,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1508,7 +1592,7 @@ mod tests {
         ]]);
 
         let outcome = execute_steps(
-            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, &AtomicBool::new(false),
+            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, None, std::path::Path::new("."), &AtomicBool::new(false),
         ).unwrap();
 
         assert_eq!(outcome.steps[0].evidence_refs.len(), 1);
@@ -1528,7 +1612,7 @@ mod tests {
         ]]);
 
         let outcome = execute_steps(
-            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, &AtomicBool::new(false),
+            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, None, std::path::Path::new("."), &AtomicBool::new(false),
         ).unwrap();
 
         assert_eq!(outcome.steps[0].evidence_refs.len(), 1);
@@ -1546,7 +1630,7 @@ mod tests {
         ]]);
 
         let outcome = execute_steps(
-            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, &AtomicBool::new(false),
+            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, None, std::path::Path::new("."), &AtomicBool::new(false),
         ).unwrap();
 
         assert!(outcome.steps[0].evidence_refs.is_empty());
@@ -1693,6 +1777,8 @@ mod tests {
             &artifact_dir,
             None,
             Some(&bootstrap),
+            None,
+            std::path::Path::new("."),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -1740,6 +1826,8 @@ mod tests {
             &artifact_dir,
             None,
             None,
+            None,
+            std::path::Path::new("."),
             &flag,
         )
         .unwrap();
