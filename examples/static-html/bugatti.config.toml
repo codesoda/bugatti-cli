@@ -2,5 +2,12 @@
 # The agent opens index.html directly in the browser.
 
 [provider]
-extra_system_prompt = "Use the browser to open and interact with the local HTML file."
-agent_args = ["--dangerously-skip-permissions"]
+extra_system_prompt = "Use a headed browser (using `agent-browser` skill and record a video of the test run into the run artifacts) for UI tests."
+agent_args = [
+    "--dangerously-skip-permissions",
+    "--no-session-persistence",
+    "--model",
+    "haiku",
+    "--effort",
+    "medium",
+]

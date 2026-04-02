@@ -107,6 +107,9 @@ struct ContentBlock {
     /// Tool use input arguments
     #[serde(default)]
     input: Option<serde_json::Value>,
+    /// Tool result: links back to the tool_use id
+    #[serde(default)]
+    tool_use_id: Option<String>,
 }
 
 /// Format a user message as stream-json input for the Claude CLI.
@@ -365,7 +368,8 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                             v.to_string()
                                                         }
                                                     }).unwrap_or_default();
-                                                    eprintln!("{}[verbose]{} {}tool:{} {}{}{} {}{}{}", color::DIM, color::RESET, color::DIM, color::RESET, color::TOOL, name, color::RESET, color::LIGHT, input_preview, color::RESET);
+                                                    let id_short = block.id.as_deref().unwrap_or("").chars().take(12).collect::<String>();
+                                                    eprintln!("{}[verbose]{} {}tool:{} {}{}{} {}{}{} {}({}){}", color::DIM, color::RESET, color::DIM, color::RESET, color::TOOL, name, color::RESET, color::LIGHT, input_preview, color::RESET, color::DIM, id_short, color::RESET);
                                                 }
                                             }
                                             "thinking" => {
@@ -396,7 +400,8 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                     })
                                                     .or_else(|| block.text.clone())
                                                     .unwrap_or_default();
-                                                eprintln!("{}[verbose]{} {}result:{}", color::DIM, color::RESET, color::DIM, color::RESET);
+                                                let id_short = block.tool_use_id.as_deref().unwrap_or("").chars().take(12).collect::<String>();
+                                                eprintln!("{}[verbose]{} {}result:{} {}({}){}", color::DIM, color::RESET, color::DIM, color::RESET, color::DIM, id_short, color::RESET);
                                                 eprintln!("{}{}{}", color::RESULT, result_text, color::RESET);
                                             }
                                         }
