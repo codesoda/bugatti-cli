@@ -156,9 +156,62 @@ Test files are TOML with a `.test.toml` extension. Each step must have exactly o
 | `skip` | If `true`, step is skipped (counts as passed) |
 | `checkpoint` | Checkpoint name — saves state after pass, restores if skipped |
 
-### Shared Test Files
+### Includes and Shared Test Files
 
-Prefix with `_` to exclude from discovery. Other tests pull them in via `include_path`:
+Steps can include other test files inline using `include_path` or `include_glob`. The included file's steps are expanded in place, creating a flat step list for execution.
+
+#### Single file include
+
+```toml
+# login.test.toml
+name = "Login flow"
+
+[[steps]]
+include_path = "_setup.test.toml"
+
+[[steps]]
+instruction = "Navigate to /login and submit credentials"
+
+[[steps]]
+instruction = "Verify redirect to dashboard"
+```
+
+The steps from `_setup.test.toml` are inserted at position 1, before the login steps. Paths are relative to the including file's directory.
+
+#### Glob include
+
+Include multiple files matching a glob pattern. Matched files are sorted alphabetically for deterministic order.
+
+```toml
+# full-suite.test.toml
+name = "Full test suite"
+
+[[steps]]
+include_path = "_setup.test.toml"
+
+[[steps]]
+include_glob = "features/*.test.toml"
+```
+
+This includes `_setup.test.toml` first, then all `*.test.toml` files under `features/` in alphabetical order.
+
+#### Shared files with `_` prefix
+
+Files prefixed with `_` are excluded from automatic discovery (`bugatti test` without a path argument). This lets you create reusable building blocks that are only executed when included by other test files.
+
+```
+project/
+  bugatti.config.toml
+  _setup.test.toml          # shared — not discovered
+  _teardown.test.toml       # shared — not discovered
+  login.test.toml            # discovered — includes _setup
+  checkout.test.toml         # discovered — includes _setup
+  features/
+    _auth-helpers.test.toml  # shared — not discovered
+    signup.test.toml          # discovered
+```
+
+Example shared setup file:
 
 ```toml
 # _setup.test.toml
@@ -166,18 +219,45 @@ name = "Shared setup"
 
 [[steps]]
 instruction = "Verify the health endpoint returns 200"
+
+[[steps]]
+instruction = "Clear test data from the database"
 ```
+
+#### Nested includes
+
+Included files can include other files. Bugatti expands everything into a flat step list with sequential IDs.
 
 ```toml
-# smoke.test.toml
-name = "Smoke test"
+# _auth.test.toml
+name = "Auth helpers"
 
 [[steps]]
-include_path = "_setup.test.toml"
+instruction = "Log in as test user"
 
 [[steps]]
-instruction = "Verify the homepage renders"
+include_path = "_verify-session.test.toml"
 ```
+
+#### Cycle detection
+
+Bugatti detects circular includes and fails with a clear error showing the chain:
+
+```
+include cycle detected: root.test.toml -> auth.test.toml -> root.test.toml
+```
+
+#### Provenance
+
+Each step tracks which file it came from. The console output shows this:
+
+```
+STEP 1/5 ... Verify health endpoint (from _setup.test.toml)
+STEP 2/5 ... Clear test data (from _setup.test.toml)
+STEP 3/5 ... Navigate to /login (from login.test.toml)
+```
+
+This makes it easy to identify which file to edit when a step fails.
 
 ### Per-Test Overrides
 
