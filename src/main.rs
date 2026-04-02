@@ -22,6 +22,14 @@ use bugatti::test_file;
 /// Global flag set by the Ctrl+C handler.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+/// Display a path relative to the current directory, falling back to absolute.
+fn relative_display(path: &Path) -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(&cwd).ok().map(|p| p.display().to_string()))
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 /// Check whether the run has been interrupted by Ctrl+C.
 pub fn is_interrupted() -> bool {
     INTERRUPTED.load(Ordering::Relaxed)
@@ -58,6 +66,9 @@ fn main() {
     }
 
     let cli = Cli::parse();
+
+    println!("\x1b[1mbugatti\x1b[0m \x1b[38;5;243mv{}\x1b[0m", env!("CARGO_PKG_VERSION"));
+    println!();
 
     let code = match cli.command {
         Commands::Test { path, skip_cmds, skip_readiness, strict_warnings, verbose } => {
@@ -256,7 +267,7 @@ impl<'a> PipelineContext<'a> {
             name: self.test_name.to_string(),
             exit_code,
             run_id: Some(self.run_id.0.clone()),
-            report_path: Some(report::report_path(self.artifact_dir).display().to_string()),
+            report_path: Some(relative_display(&report::report_path(self.artifact_dir))),
             error: Some(error),
         }
     }
@@ -311,6 +322,21 @@ fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::Ex
         test_file = %ctx.test_path.display(),
         "starting test pipeline"
     );
+
+    // Print per-test run info
+    let dim = "\x1b[38;5;243m";
+    let light = "\x1b[38;5;250m";
+    let reset = "\x1b[0m";
+    if ctx.effective.provider.agent_args.is_empty() {
+        println!("  {dim}Provider:{reset}  {}", ctx.effective.provider.name);
+    } else {
+        println!("  {dim}Provider:{reset}  {} {light}({}){reset}", ctx.effective.provider.name, ctx.effective.provider.agent_args.join(" "));
+    }
+    println!("  {dim}Run ID:{reset}    {}", ctx.run_id);
+    println!("  {dim}Steps:{reset}     {}", steps.len());
+    println!("  {dim}Artifacts:{reset}");
+    println!("  {}", relative_display(&ctx.artifact_dir.root));
+    println!();
 
     let mut no_processes = vec![];
 
@@ -414,7 +440,7 @@ fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::Ex
         name: ctx.test_name.to_string(),
         exit_code,
         run_id: Some(ctx.run_id.0.clone()),
-        report_path: Some(report::report_path(ctx.artifact_dir).display().to_string()),
+        report_path: Some(relative_display(&report::report_path(ctx.artifact_dir))),
         error: None,
     }
 }
@@ -452,7 +478,7 @@ fn run_discovery(project_root: &Path, skip_cmds: &[String], skip_readiness: &[St
 
     println!("Found {} root test file(s):\n", discovery.tests.len());
     for test in &discovery.tests {
-        println!("  - {} ({})", test.name, test.path.display());
+        println!("  - {} ({})", test.name, relative_display(&test.path));
     }
     println!();
 
@@ -506,7 +532,7 @@ fn run_single_test(
     verbose: bool,
 ) -> TestRunResult {
     println!("═══════════════════════════════════════════════════════");
-    println!("Running: {} ({})", test.name, test.path.display());
+    println!("Running: {} ({})", test.name, relative_display(&test.path));
     println!("═══════════════════════════════════════════════════════");
 
     let result = run_test_pipeline(project_root, &test.path, skip_cmds, skip_readiness, strict_warnings, verbose);
@@ -550,7 +576,7 @@ fn print_aggregate_summary(
         println!(
             "  {status} ........ {} ({})",
             result.name,
-            result.path.display()
+            relative_display(&result.path)
         );
         if let Some(err) = &result.error {
             println!("               {err}");

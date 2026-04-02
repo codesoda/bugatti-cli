@@ -391,12 +391,16 @@ pub fn execute_steps(
             source = %step.source_file.display(),
             "step execution begin"
         );
+        let display_source = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| step.source_file.strip_prefix(&cwd).ok().map(|p| p.display().to_string()))
+            .unwrap_or_else(|| step.source_file.display().to_string());
         println!(
             "STEP {}/{} ... {} (from {})",
             step.step_id + 1,
             total_steps,
             instruction_summary,
-            step.source_file.display()
+            display_source
         );
 
         let step_start = Instant::now();
@@ -516,13 +520,7 @@ pub fn execute_steps(
         }
     }
 
-    let all_passed = outcomes.iter().all(|o| o.result.is_pass());
-    let total_duration = run_start.elapsed();
-
-    // Print final run status
-    print_run_summary(&outcomes, total_duration, total_steps);
-
-    // Send teardown message (best-effort, non-fatal)
+    // Send teardown message before summary (best-effort, non-fatal)
     if !interrupted.load(Ordering::Relaxed) {
         println!("TEARDOWN .. cleaning up");
         let teardown_msg = StepMessage {
@@ -565,6 +563,12 @@ pub fn execute_steps(
             }
         }
     }
+
+    let all_passed = outcomes.iter().all(|o| o.result.is_pass());
+    let total_duration = run_start.elapsed();
+
+    // Print final run status (after teardown)
+    print_run_summary(&outcomes, total_duration, total_steps);
 
     // Flush/close the full transcript file
     drop(full_transcript_file);

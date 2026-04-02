@@ -2,7 +2,14 @@
 
 [provider]
 step_timeout_secs = 120
-agent_args = ["--dangerously-skip-permissions"]
+agent_args = [
+    "--dangerously-skip-permissions",
+    "--no-session-persistence",
+    "--model",
+    "haiku",
+    "--effort",
+    "medium",
+]
 
 [commands.build]
 kind = "short_lived"

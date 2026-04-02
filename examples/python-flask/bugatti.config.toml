@@ -2,8 +2,20 @@
 
 [provider]
 strict_warnings = true
+extra_system_prompt = "This is a Python Flask app. Use a headed browser (using `agent-browser` skill and record a video of the test run into the run artifacts) for UI tests. Use curl or fetch for API tests."
 base_url = "http://localhost:5111"
-agent_args = ["--dangerously-skip-permissions"]
+agent_args = [
+    "--dangerously-skip-permissions",
+    "--no-session-persistence",
+    "--model",
+    "haiku",
+    "--effort",
+    "medium",
+]
+
+[commands.install]
+kind = "short_lived"
+cmd = "pip3 install -r requirements.txt"
 
 [commands.server]
 kind = "long_lived"
