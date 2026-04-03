@@ -73,11 +73,17 @@ pub fn exit_code_for_run_strict(outcome: &RunOutcome, strict_warnings: bool) -> 
         return exit_code_for_run(outcome);
     }
     // With strict warnings: only pure OK is passing
-    let has_timeout = outcome.steps.iter().any(|s| matches!(&s.result, StepResult::Timeout));
+    let has_timeout = outcome
+        .steps
+        .iter()
+        .any(|s| matches!(&s.result, StepResult::Timeout));
     if has_timeout {
         return EXIT_TIMEOUT;
     }
-    let all_ok = outcome.steps.iter().all(|s| matches!(&s.result, StepResult::Verdict(StepVerdict::Ok)));
+    let all_ok = outcome
+        .steps
+        .iter()
+        .all(|s| matches!(&s.result, StepResult::Verdict(StepVerdict::Ok)));
     if all_ok {
         EXIT_OK
     } else {

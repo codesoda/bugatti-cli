@@ -42,7 +42,11 @@ impl MockProvider {
 }
 
 impl AgentSession for MockProvider {
-    fn initialize(_config: &Config, _artifact_dir: &Path, _verbose: bool) -> Result<Self, ProviderError>
+    fn initialize(
+        _config: &Config,
+        _artifact_dir: &Path,
+        _verbose: bool,
+    ) -> Result<Self, ProviderError>
     where
         Self: Sized,
     {

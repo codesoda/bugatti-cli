@@ -27,7 +27,11 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 fn relative_display(path: &Path) -> String {
     std::env::current_dir()
         .ok()
-        .and_then(|cwd| path.strip_prefix(&cwd).ok().map(|p| p.display().to_string()))
+        .and_then(|cwd| {
+            path.strip_prefix(&cwd)
+                .ok()
+                .map(|p| p.display().to_string())
+        })
         .unwrap_or_else(|| path.display().to_string())
 }
 
@@ -68,11 +72,21 @@ fn main() {
 
     let cli = Cli::parse();
 
-    println!("\x1b[1mbugatti\x1b[0m \x1b[38;5;243mv{}\x1b[0m", env!("CARGO_PKG_VERSION"));
+    println!(
+        "\x1b[1mbugatti\x1b[0m \x1b[38;5;243mv{}\x1b[0m",
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
 
     let code = match cli.command {
-        Commands::Test { path, skip_cmds, skip_readiness, strict_warnings, from_checkpoint, verbose } => {
+        Commands::Test {
+            path,
+            skip_cmds,
+            skip_readiness,
+            strict_warnings,
+            from_checkpoint,
+            verbose,
+        } => {
             let project_root = std::env::current_dir().unwrap_or_else(|e| {
                 eprintln!("ERROR: failed to determine current directory: {e}");
                 std::process::exit(EXIT_CONFIG_ERROR);
@@ -88,7 +102,15 @@ fn main() {
                         eprintln!("ERROR: test file not found: {p}");
                         EXIT_CONFIG_ERROR
                     } else {
-                        let result = run_test_pipeline(&project_root, &test_path, &skip_cmds, &skip_readiness, strict_warnings, from_checkpoint.as_deref(), verbose);
+                        let result = run_test_pipeline(
+                            &project_root,
+                            &test_path,
+                            &skip_cmds,
+                            &skip_readiness,
+                            strict_warnings,
+                            from_checkpoint.as_deref(),
+                            verbose,
+                        );
                         // Print run reference for single-file mode
                         if let Some(run_id) = &result.run_id {
                             println!("\nRun ID: {run_id}");
@@ -104,7 +126,14 @@ fn main() {
                         result.exit_code
                     }
                 }
-                None => run_discovery(&project_root, &skip_cmds, &skip_readiness, strict_warnings, from_checkpoint.as_deref(), verbose),
+                None => run_discovery(
+                    &project_root,
+                    &skip_cmds,
+                    &skip_readiness,
+                    strict_warnings,
+                    from_checkpoint.as_deref(),
+                    verbose,
+                ),
             }
         }
     };
@@ -116,7 +145,15 @@ fn main() {
 ///
 /// Pipeline order: config load -> parse -> expand -> artifact setup -> command setup
 /// -> provider init -> step execution -> report -> teardown -> exit
-fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool, from_checkpoint: Option<&str>, verbose: bool) -> TestRunResult {
+fn run_test_pipeline(
+    project_root: &Path,
+    test_path: &Path,
+    skip_cmds: &[String],
+    skip_readiness: &[String],
+    strict_warnings: bool,
+    from_checkpoint: Option<&str>,
+    verbose: bool,
+) -> TestRunResult {
     let test_name_fallback = test_path.display().to_string();
 
     // Phase 1: Load config
@@ -210,7 +247,8 @@ fn run_test_pipeline(project_root: &Path, test_path: &Path, skip_cmds: &[String]
         };
 
     // Resolve effective strict_warnings: CLI flag overrides config value
-    let effective_strict_warnings = strict_warnings || effective.provider.strict_warnings.unwrap_or(false);
+    let effective_strict_warnings =
+        strict_warnings || effective.provider.strict_warnings.unwrap_or(false);
 
     // From here on, we have a run_id and artifact_dir — always try best-effort reporting.
     let ctx = PipelineContext {
@@ -312,7 +350,10 @@ impl<'a> PipelineContext<'a> {
 
 /// Continue the pipeline after artifact setup. Ensures best-effort report writing
 /// and subprocess teardown even on failure.
-fn run_test_with_artifacts(ctx: &PipelineContext, mut steps: Vec<bugatti::expand::ExpandedStep>) -> TestRunResult {
+fn run_test_with_artifacts(
+    ctx: &PipelineContext,
+    mut steps: Vec<bugatti::expand::ExpandedStep>,
+) -> TestRunResult {
     // Phase 7: Initialize tracing
     let _tracing_guard = match diagnostics::init_tracing(ctx.artifact_dir) {
         Ok(g) => Some(g),
@@ -335,7 +376,11 @@ fn run_test_with_artifacts(ctx: &PipelineContext, mut steps: Vec<bugatti::expand
     if ctx.effective.provider.agent_args.is_empty() {
         println!("  {dim}Provider:{reset}  {}", ctx.effective.provider.name);
     } else {
-        println!("  {dim}Provider:{reset}  {} {light}({}){reset}", ctx.effective.provider.name, ctx.effective.provider.agent_args.join(" "));
+        println!(
+            "  {dim}Provider:{reset}  {} {light}({}){reset}",
+            ctx.effective.provider.name,
+            ctx.effective.provider.agent_args.join(" ")
+        );
     }
     println!("  {dim}Run ID:{reset}    {}", ctx.run_id);
     println!("  {dim}Steps:{reset}     {}", steps.len());
@@ -353,7 +398,9 @@ fn run_test_with_artifacts(ctx: &PipelineContext, mut steps: Vec<bugatti::expand
                 &mut no_processes,
             );
         }
-        let cp_step_idx = steps.iter().position(|s| s.checkpoint.as_deref() == Some(cp_name));
+        let cp_step_idx = steps
+            .iter()
+            .position(|s| s.checkpoint.as_deref() == Some(cp_name));
         match cp_step_idx {
             Some(idx) => {
                 println!("  {dim}Checkpoint:{reset} resuming from \"{cp_name}\" (skipping steps 1-{}){reset}", idx + 1);
@@ -363,14 +410,18 @@ fn run_test_with_artifacts(ctx: &PipelineContext, mut steps: Vec<bugatti::expand
                 }
             }
             None => {
-                let available: Vec<&str> = steps.iter()
+                let available: Vec<&str> = steps
+                    .iter()
                     .filter_map(|s| s.checkpoint.as_deref())
                     .collect();
                 let mut no_processes = vec![];
                 let msg = if available.is_empty() {
                     format!("checkpoint \"{cp_name}\" not found — no steps have checkpoint fields")
                 } else {
-                    format!("checkpoint \"{cp_name}\" not found. Available: {}", available.join(", "))
+                    format!(
+                        "checkpoint \"{cp_name}\" not found. Available: {}",
+                        available.join(", ")
+                    )
                 };
                 return ctx.fail_early(EXIT_CONFIG_ERROR, msg, &mut no_processes);
             }
@@ -380,40 +431,65 @@ fn run_test_with_artifacts(ctx: &PipelineContext, mut steps: Vec<bugatti::expand
     let mut no_processes = vec![];
 
     // Phase 8: Run short-lived setup commands
-    if let Err(e) = command::run_short_lived_commands(ctx.effective, ctx.artifact_dir, ctx.skip_cmds) {
+    if let Err(e) =
+        command::run_short_lived_commands(ctx.effective, ctx.artifact_dir, ctx.skip_cmds)
+    {
         tracing::error!(error = %e, "short-lived command failed");
-        return ctx.fail_early(EXIT_SETUP_ERROR, format!("setup command failed: {e}"), &mut no_processes);
+        return ctx.fail_early(
+            EXIT_SETUP_ERROR,
+            format!("setup command failed: {e}"),
+            &mut no_processes,
+        );
     }
 
     // Phase 9: Spawn long-lived commands
-    let mut tracked_processes: Vec<TrackedProcess> =
-        match command::spawn_long_lived_commands(ctx.effective, ctx.artifact_dir, ctx.skip_cmds, ctx.skip_readiness) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!(error = %e, "long-lived command failed");
-                return ctx.fail_early(EXIT_PROVIDER_ERROR, format!("long-lived command failed: {e}"), &mut no_processes);
-            }
-        };
-
-    // Phase 10: Initialize provider session
-    let mut session = match ClaudeCodeAdapter::initialize(ctx.effective, &ctx.artifact_dir.root, ctx.verbose) {
-        Ok(s) => s,
+    let mut tracked_processes: Vec<TrackedProcess> = match command::spawn_long_lived_commands(
+        ctx.effective,
+        ctx.artifact_dir,
+        ctx.skip_cmds,
+        ctx.skip_readiness,
+    ) {
+        Ok(p) => p,
         Err(e) => {
-            tracing::error!(error = %e, "provider initialization failed");
-            return ctx.fail_early(EXIT_PROVIDER_ERROR, format!("provider initialization failed: {e}"), &mut tracked_processes);
+            tracing::error!(error = %e, "long-lived command failed");
+            return ctx.fail_early(
+                EXIT_PROVIDER_ERROR,
+                format!("long-lived command failed: {e}"),
+                &mut no_processes,
+            );
         }
     };
 
+    // Phase 10: Initialize provider session
+    let mut session =
+        match ClaudeCodeAdapter::initialize(ctx.effective, &ctx.artifact_dir.root, ctx.verbose) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "provider initialization failed");
+                return ctx.fail_early(
+                    EXIT_PROVIDER_ERROR,
+                    format!("provider initialization failed: {e}"),
+                    &mut tracked_processes,
+                );
+            }
+        };
+
     if let Err(e) = session.start() {
         tracing::error!(error = %e, "provider start failed");
-        return ctx.fail_early(EXIT_PROVIDER_ERROR, format!("provider start failed: {e}"), &mut tracked_processes);
+        return ctx.fail_early(
+            EXIT_PROVIDER_ERROR,
+            format!("provider start failed: {e}"),
+            &mut tracked_processes,
+        );
     }
 
     // Phase 11: Check for unexpected exits before step execution
     if let Some((name, code)) = command::check_for_unexpected_exits(&mut tracked_processes) {
         tracing::error!(command = %name, exit_code = ?code, "long-lived process exited unexpectedly");
         let _ = session.close();
-        let code_str = code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string());
+        let code_str = code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
         return ctx.fail_early(
             EXIT_PROVIDER_ERROR,
             format!("long-lived process '{name}' exited unexpectedly (code: {code_str})"),
@@ -429,7 +505,10 @@ fn run_test_with_artifacts(ctx: &PipelineContext, mut steps: Vec<bugatti::expand
         base_url: ctx.effective.provider.base_url.as_deref(),
         artifact_dir: ctx.artifact_dir,
     };
-    let step_timeout = ctx.effective.provider.step_timeout_secs
+    let step_timeout = ctx
+        .effective
+        .provider
+        .step_timeout_secs
         .map(std::time::Duration::from_secs);
     let outcome = match executor::execute_steps(
         &mut session,
@@ -447,7 +526,11 @@ fn run_test_with_artifacts(ctx: &PipelineContext, mut steps: Vec<bugatti::expand
         Err(e) => {
             tracing::error!(error = %e, "step execution failed");
             let _ = session.close();
-            return ctx.fail_early(EXIT_STEP_ERROR, format!("execution error: {e}"), &mut tracked_processes);
+            return ctx.fail_early(
+                EXIT_STEP_ERROR,
+                format!("execution error: {e}"),
+                &mut tracked_processes,
+            );
         }
     };
 
@@ -489,7 +572,14 @@ fn run_test_with_artifacts(ctx: &PipelineContext, mut steps: Vec<bugatti::expand
 
 /// Discover and run all root test files, printing an aggregate summary.
 /// Returns the aggregate exit code.
-fn run_discovery(project_root: &Path, skip_cmds: &[String], skip_readiness: &[String], strict_warnings: bool, from_checkpoint: Option<&str>, verbose: bool) -> i32 {
+fn run_discovery(
+    project_root: &Path,
+    skip_cmds: &[String],
+    skip_readiness: &[String],
+    strict_warnings: bool,
+    from_checkpoint: Option<&str>,
+    verbose: bool,
+) -> i32 {
     println!("Discovering root test files...");
 
     let discovery = match discover_root_tests(project_root) {
@@ -539,7 +629,15 @@ fn run_discovery(project_root: &Path, skip_cmds: &[String], skip_readiness: &[St
             });
             continue;
         }
-        let result = run_single_test(test, project_root, skip_cmds, skip_readiness, strict_warnings, from_checkpoint, verbose);
+        let result = run_single_test(
+            test,
+            project_root,
+            skip_cmds,
+            skip_readiness,
+            strict_warnings,
+            from_checkpoint,
+            verbose,
+        );
         results.push(result);
     }
 
@@ -578,7 +676,15 @@ fn run_single_test(
     println!("Running: {} ({})", test.name, relative_display(&test.path));
     println!("═══════════════════════════════════════════════════════");
 
-    let result = run_test_pipeline(project_root, &test.path, skip_cmds, skip_readiness, strict_warnings, from_checkpoint, verbose);
+    let result = run_test_pipeline(
+        project_root,
+        &test.path,
+        skip_cmds,
+        skip_readiness,
+        strict_warnings,
+        from_checkpoint,
+        verbose,
+    );
 
     if let Some(err) = &result.error {
         eprintln!("  ERROR: {err}");
@@ -672,7 +778,9 @@ mod tests {
     fn test_subcommand_no_path() {
         let cli = Cli::parse_from(["bugatti", "test"]);
         match cli.command {
-            bugatti::cli::Commands::Test { path, skip_cmds, .. } => {
+            bugatti::cli::Commands::Test {
+                path, skip_cmds, ..
+            } => {
                 assert!(path.is_none());
                 assert!(skip_cmds.is_empty());
             }
@@ -683,7 +791,9 @@ mod tests {
     fn test_subcommand_with_path() {
         let cli = Cli::parse_from(["bugatti", "test", "some/path.test.toml"]);
         match cli.command {
-            bugatti::cli::Commands::Test { path, skip_cmds, .. } => {
+            bugatti::cli::Commands::Test {
+                path, skip_cmds, ..
+            } => {
                 assert_eq!(path.unwrap(), "some/path.test.toml");
                 assert!(skip_cmds.is_empty());
             }
@@ -694,7 +804,9 @@ mod tests {
     fn test_subcommand_with_skip_cmd() {
         let cli = Cli::parse_from(["bugatti", "test", "--skip-cmd", "migrate"]);
         match cli.command {
-            bugatti::cli::Commands::Test { path, skip_cmds, .. } => {
+            bugatti::cli::Commands::Test {
+                path, skip_cmds, ..
+            } => {
                 assert!(path.is_none());
                 assert_eq!(skip_cmds, vec!["migrate".to_string()]);
             }
@@ -713,7 +825,9 @@ mod tests {
             "server",
         ]);
         match cli.command {
-            bugatti::cli::Commands::Test { path, skip_cmds, .. } => {
+            bugatti::cli::Commands::Test {
+                path, skip_cmds, ..
+            } => {
                 assert_eq!(path.unwrap(), "my.test.toml");
                 assert_eq!(skip_cmds, vec!["migrate".to_string(), "server".to_string()]);
             }
@@ -723,12 +837,19 @@ mod tests {
     #[test]
     fn test_subcommand_with_skip_readiness() {
         let cli = Cli::parse_from([
-            "bugatti", "test",
-            "--skip-cmd", "server",
-            "--skip-readiness", "server",
+            "bugatti",
+            "test",
+            "--skip-cmd",
+            "server",
+            "--skip-readiness",
+            "server",
         ]);
         match cli.command {
-            bugatti::cli::Commands::Test { skip_cmds, skip_readiness, .. } => {
+            bugatti::cli::Commands::Test {
+                skip_cmds,
+                skip_readiness,
+                ..
+            } => {
                 assert_eq!(skip_cmds, vec!["server".to_string()]);
                 assert_eq!(skip_readiness, vec!["server".to_string()]);
             }
@@ -739,7 +860,9 @@ mod tests {
     fn test_subcommand_with_strict_warnings() {
         let cli = Cli::parse_from(["bugatti", "test", "--strict-warnings"]);
         match cli.command {
-            bugatti::cli::Commands::Test { strict_warnings, .. } => {
+            bugatti::cli::Commands::Test {
+                strict_warnings, ..
+            } => {
                 assert!(strict_warnings);
             }
         }

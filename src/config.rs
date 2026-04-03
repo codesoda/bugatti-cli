@@ -116,14 +116,9 @@ impl ProviderConfig {
                 .agent_args
                 .clone()
                 .unwrap_or_else(|| self.agent_args.clone()),
-            step_timeout_secs: overrides
-                .step_timeout_secs
-                .or(self.step_timeout_secs),
+            step_timeout_secs: overrides.step_timeout_secs.or(self.step_timeout_secs),
             strict_warnings: self.strict_warnings,
-            base_url: overrides
-                .base_url
-                .clone()
-                .or_else(|| self.base_url.clone()),
+            base_url: overrides.base_url.clone().or_else(|| self.base_url.clone()),
         }
     }
 }

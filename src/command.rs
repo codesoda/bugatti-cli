@@ -120,10 +120,7 @@ pub fn validate_skip_readiness(
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "invalid --skip-readiness: {}",
-            errors.join("; ")
-        ))
+        Err(format!("invalid --skip-readiness: {}", errors.join("; ")))
     }
 }
 
@@ -222,7 +219,14 @@ fn print_output_tail(label: &str, output: &[u8]) {
     if lines.is_empty() {
         return;
     }
-    let tail: Vec<&str> = lines.into_iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: Vec<&str> = lines
+        .into_iter()
+        .rev()
+        .take(10)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     println!("  {label}:");
     for line in tail {
         println!("    {line}");
@@ -248,8 +252,12 @@ pub fn run_checkpoint_command(
     timeout_secs: Option<u64>,
 ) -> Result<(), String> {
     let cp_path = checkpoint_path(project_root, checkpoint_id);
-    std::fs::create_dir_all(&cp_path)
-        .map_err(|e| format!("failed to create checkpoint dir '{}': {e}", cp_path.display()))?;
+    std::fs::create_dir_all(&cp_path).map_err(|e| {
+        format!(
+            "failed to create checkpoint dir '{}': {e}",
+            cp_path.display()
+        )
+    })?;
 
     let timeout = timeout_secs
         .map(Duration::from_secs)
@@ -269,24 +277,29 @@ pub fn run_checkpoint_command(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = child.stdout.take().map(|mut s| {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(&mut s, &mut buf).ok();
-                    buf
-                }).unwrap_or_default();
-                let stderr = child.stderr.take().map(|mut s| {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(&mut s, &mut buf).ok();
-                    buf
-                }).unwrap_or_default();
+                let stdout = child
+                    .stdout
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = Vec::new();
+                        std::io::Read::read_to_end(&mut s, &mut buf).ok();
+                        buf
+                    })
+                    .unwrap_or_default();
+                let stderr = child
+                    .stderr
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = Vec::new();
+                        std::io::Read::read_to_end(&mut s, &mut buf).ok();
+                        buf
+                    })
+                    .unwrap_or_default();
 
                 if !status.success() {
                     print_output_tail("stderr", &stderr);
                     print_output_tail("stdout", &stdout);
-                    return Err(format!(
-                        "exited with code {}",
-                        status.code().unwrap_or(-1)
-                    ));
+                    return Err(format!("exited with code {}", status.code().unwrap_or(-1)));
                 }
                 return Ok(());
             }
@@ -812,7 +825,8 @@ mod tests {
         ]);
 
         let mut tracked =
-            spawn_long_lived_commands(&config, &artifact_dir, &["server".to_string()], &[]).unwrap();
+            spawn_long_lived_commands(&config, &artifact_dir, &["server".to_string()], &[])
+                .unwrap();
         assert_eq!(tracked.len(), 1);
         assert_eq!(tracked[0].name, "worker");
 
@@ -907,28 +921,26 @@ mod tests {
 
     #[test]
     fn validate_skip_readiness_valid() {
-        let config = make_config(vec![
-            ("server", CommandKind::LongLived, "sleep 60"),
-        ]);
-        assert!(validate_skip_readiness(&config, &["server".to_string()], &["server".to_string()]).is_ok());
+        let config = make_config(vec![("server", CommandKind::LongLived, "sleep 60")]);
+        assert!(
+            validate_skip_readiness(&config, &["server".to_string()], &["server".to_string()])
+                .is_ok()
+        );
         assert!(validate_skip_readiness(&config, &["server".to_string()], &[]).is_ok());
     }
 
     #[test]
     fn validate_skip_readiness_must_be_skipped() {
-        let config = make_config(vec![
-            ("server", CommandKind::LongLived, "sleep 60"),
-        ]);
+        let config = make_config(vec![("server", CommandKind::LongLived, "sleep 60")]);
         let err = validate_skip_readiness(&config, &[], &["server".to_string()]).unwrap_err();
         assert!(err.contains("not in --skip-cmd"), "error: {err}");
     }
 
     #[test]
     fn validate_skip_readiness_unknown_command() {
-        let config = make_config(vec![
-            ("server", CommandKind::LongLived, "sleep 60"),
-        ]);
-        let err = validate_skip_readiness(&config, &["server".to_string()], &["bogus".to_string()]).unwrap_err();
+        let config = make_config(vec![("server", CommandKind::LongLived, "sleep 60")]);
+        let err = validate_skip_readiness(&config, &["server".to_string()], &["bogus".to_string()])
+            .unwrap_err();
         assert!(err.contains("not a known command"), "error: {err}");
     }
 
@@ -940,9 +952,12 @@ mod tests {
         artifact_dir.create_all().unwrap();
 
         // Readiness URL points to unreachable host — would fail without skip_readiness
-        let config = make_config_with_readiness(vec![
-            ("server", CommandKind::LongLived, "sleep 60", Some("http://127.0.0.1:1/nonexistent")),
-        ]);
+        let config = make_config_with_readiness(vec![(
+            "server",
+            CommandKind::LongLived,
+            "sleep 60",
+            Some("http://127.0.0.1:1/nonexistent"),
+        )]);
 
         // Skip both the command and its readiness check
         let tracked = spawn_long_lived_commands(
@@ -950,7 +965,8 @@ mod tests {
             &artifact_dir,
             &["server".to_string()],
             &["server".to_string()],
-        ).unwrap();
+        )
+        .unwrap();
 
         // No processes spawned (command was skipped), and no readiness error
         assert!(tracked.is_empty());

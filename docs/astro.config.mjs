@@ -7,7 +7,7 @@ export default defineConfig({
 	site: 'https://bugatti.dev',
 	integrations: [
 		starlight({
-			title: 'bugatti',
+			title: '🚗 bugatti',
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/codesoda/bugatti-cli' }],
 			sidebar: [
 				{ label: 'Getting Started', slug: 'getting-started' },

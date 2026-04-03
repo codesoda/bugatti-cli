@@ -56,8 +56,10 @@ pub struct ClaudeCodeAdapter {
 pub(crate) fn format_step_message(message: &StepMessage) -> String {
     format!(
         "[run_id={} session_id={} step={}/{} source={}]\n\n{}",
-        message.run_id, message.session_id,
-        message.step_id + 1, message.total_steps,
+        message.run_id,
+        message.session_id,
+        message.step_id + 1,
+        message.total_steps,
         message.source_file,
         message.instruction
     )
@@ -165,21 +167,40 @@ impl ClaudeCodeAdapter {
             .stderr(Stdio::piped());
 
         if self.verbose {
-            let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
-            eprintln!("{}[verbose]{} {}launch:{} {} {}{}", color::DIM, color::RESET, color::DIM, color::RESET, color::CMD, args.join(" "), color::RESET);
-            eprintln!("{}         binary: {}{}", color::DIM, cmd.get_program().to_string_lossy(), color::RESET);
+            let args: Vec<_> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            eprintln!(
+                "{}[verbose]{} {}launch:{} {} {}{}",
+                color::DIM,
+                color::RESET,
+                color::DIM,
+                color::RESET,
+                color::CMD,
+                args.join(" "),
+                color::RESET
+            );
+            eprintln!(
+                "{}         binary: {}{}",
+                color::DIM,
+                cmd.get_program().to_string_lossy(),
+                color::RESET
+            );
         }
 
-        let mut child = cmd.spawn().map_err(|e| {
-            ProviderError::StartFailed(format!("failed to spawn claude CLI: {e}"))
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ProviderError::StartFailed(format!("failed to spawn claude CLI: {e}")))?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            ProviderError::StartFailed("failed to capture stdin".to_string())
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            ProviderError::StartFailed("failed to capture stdout".to_string())
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ProviderError::StartFailed("failed to capture stdin".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProviderError::StartFailed("failed to capture stdout".to_string()))?;
 
         self.child = Some(child);
         self.stdin = Some(stdin);
@@ -197,14 +218,22 @@ impl ClaudeCodeAdapter {
     {
         self.ensure_started()?;
 
-        let stdin = self.stdin.as_mut().ok_or_else(|| {
-            ProviderError::SendFailed("session not started".to_string())
-        })?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| ProviderError::SendFailed("session not started".to_string()))?;
 
         let input_line = format_stream_input(message);
 
         if self.verbose {
-            eprintln!("{}[verbose]{} {}prompt ({} bytes):{}", color::DIM, color::RESET, color::DIM, message.len(), color::RESET);
+            eprintln!(
+                "{}[verbose]{} {}prompt ({} bytes):{}",
+                color::DIM,
+                color::RESET,
+                color::DIM,
+                message.len(),
+                color::RESET
+            );
             eprintln!("{}{}{}", color::PROMPT, message, color::RESET);
             eprintln!("{}───{}", color::SEP, color::RESET);
         }
@@ -219,16 +248,25 @@ impl ClaudeCodeAdapter {
             .flush()
             .map_err(|e| ProviderError::SendFailed(format!("failed to flush stdin: {e}")))?;
 
-        let reader = self.reader.as_mut().ok_or_else(|| {
-            ProviderError::SendFailed("stdout reader not available".to_string())
-        })?;
+        let reader = self
+            .reader
+            .as_mut()
+            .ok_or_else(|| ProviderError::SendFailed("stdout reader not available".to_string()))?;
 
-        Ok(Box::new(StreamTurnIterator { reader, done: false, verbose: self.verbose }))
+        Ok(Box::new(StreamTurnIterator {
+            reader,
+            done: false,
+            verbose: self.verbose,
+        }))
     }
 }
 
 impl AgentSession for ClaudeCodeAdapter {
-    fn initialize(config: &Config, artifact_dir: &Path, verbose: bool) -> Result<Self, ProviderError>
+    fn initialize(
+        config: &Config,
+        artifact_dir: &Path,
+        verbose: bool,
+    ) -> Result<Self, ProviderError>
     where
         Self: Sized,
     {
@@ -355,28 +393,59 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                             }
                                             "tool_use" => {
                                                 if self.verbose {
-                                                    let name = block.name.as_deref().unwrap_or("unknown");
-                                                    let input_preview = block.input.as_ref().map(|v| {
-                                                        // For Bash, show the command directly
-                                                        if let Some(cmd) = v.get("command").and_then(|c| c.as_str()) {
-                                                            format!("$ {cmd}")
-                                                        } else if let Some(path) = v.get("file_path").and_then(|p| p.as_str()) {
-                                                            path.to_string()
-                                                        } else if let Some(pattern) = v.get("pattern").and_then(|p| p.as_str()) {
-                                                            format!("/{pattern}/")
-                                                        } else {
-                                                            v.to_string()
-                                                        }
-                                                    }).unwrap_or_default();
-                                                    let id_short = block.id.as_deref().unwrap_or("").chars().take(12).collect::<String>();
+                                                    let name =
+                                                        block.name.as_deref().unwrap_or("unknown");
+                                                    let input_preview = block
+                                                        .input
+                                                        .as_ref()
+                                                        .map(|v| {
+                                                            // For Bash, show the command directly
+                                                            if let Some(cmd) = v
+                                                                .get("command")
+                                                                .and_then(|c| c.as_str())
+                                                            {
+                                                                format!("$ {cmd}")
+                                                            } else if let Some(path) = v
+                                                                .get("file_path")
+                                                                .and_then(|p| p.as_str())
+                                                            {
+                                                                path.to_string()
+                                                            } else if let Some(pattern) = v
+                                                                .get("pattern")
+                                                                .and_then(|p| p.as_str())
+                                                            {
+                                                                format!("/{pattern}/")
+                                                            } else {
+                                                                v.to_string()
+                                                            }
+                                                        })
+                                                        .unwrap_or_default();
+                                                    let id_short = block
+                                                        .id
+                                                        .as_deref()
+                                                        .unwrap_or("")
+                                                        .chars()
+                                                        .take(12)
+                                                        .collect::<String>();
                                                     eprintln!("{}[verbose]{} {}tool:{} {}{}{} {}{}{} {}({}){}", color::DIM, color::RESET, color::DIM, color::RESET, color::TOOL, name, color::RESET, color::LIGHT, input_preview, color::RESET, color::DIM, id_short, color::RESET);
                                                 }
                                             }
                                             "thinking" => {
                                                 if self.verbose {
                                                     if let Some(thinking) = &block.thinking {
-                                                        eprintln!("{}[verbose]{} {}thinking:{}", color::DIM, color::RESET, color::DIM, color::RESET);
-                                                        eprintln!("{}{}{}", color::THINKING, thinking, color::RESET);
+                                                        eprintln!(
+                                                            "{}[verbose]{} {}thinking:{}",
+                                                            color::DIM,
+                                                            color::RESET,
+                                                            color::DIM,
+                                                            color::RESET
+                                                        );
+                                                        eprintln!(
+                                                            "{}{}{}",
+                                                            color::THINKING,
+                                                            thinking,
+                                                            color::RESET
+                                                        );
                                                     }
                                                 }
                                             }
@@ -392,7 +461,8 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                     if let Some(msg) = &event.message {
                                         for block in &msg.content {
                                             if block.block_type == "tool_result" {
-                                                let result_text = block.content
+                                                let result_text = block
+                                                    .content
                                                     .as_ref()
                                                     .map(|v| match v {
                                                         serde_json::Value::String(s) => s.clone(),
@@ -400,9 +470,29 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                     })
                                                     .or_else(|| block.text.clone())
                                                     .unwrap_or_default();
-                                                let id_short = block.tool_use_id.as_deref().unwrap_or("").chars().take(12).collect::<String>();
-                                                eprintln!("{}[verbose]{} {}result:{} {}({}){}", color::DIM, color::RESET, color::DIM, color::RESET, color::DIM, id_short, color::RESET);
-                                                eprintln!("{}{}{}", color::RESULT, result_text, color::RESET);
+                                                let id_short = block
+                                                    .tool_use_id
+                                                    .as_deref()
+                                                    .unwrap_or("")
+                                                    .chars()
+                                                    .take(12)
+                                                    .collect::<String>();
+                                                eprintln!(
+                                                    "{}[verbose]{} {}result:{} {}({}){}",
+                                                    color::DIM,
+                                                    color::RESET,
+                                                    color::DIM,
+                                                    color::RESET,
+                                                    color::DIM,
+                                                    id_short,
+                                                    color::RESET
+                                                );
+                                                eprintln!(
+                                                    "{}{}{}",
+                                                    color::RESULT,
+                                                    result_text,
+                                                    color::RESET
+                                                );
                                             }
                                         }
                                     }

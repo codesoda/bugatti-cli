@@ -275,7 +275,9 @@ pub fn build_bootstrap_content(
 
     // BUGATTI_LOG format
     content.push_str("## Logging\n\n");
-    content.push_str("To emit structured log events visible in the harness, output a line matching:\n");
+    content.push_str(
+        "To emit structured log events visible in the harness, output a line matching:\n",
+    );
     content.push_str("`BUGATTI_LOG <message>`\n\n");
 
     // Test metadata
@@ -293,9 +295,18 @@ pub fn build_bootstrap_content(
     // Artifact directories
     content.push_str("\n## Artifacts\n\n");
     content.push_str("Save any files produced during the test run to these directories:\n\n");
-    content.push_str(&format!("- **Root**: `{}`\n", config.artifact_dir.root.display()));
-    content.push_str(&format!("- **Screenshots**: `{}`\n", config.artifact_dir.screenshots.display()));
-    content.push_str(&format!("- **Logs**: `{}`\n", config.artifact_dir.logs.display()));
+    content.push_str(&format!(
+        "- **Root**: `{}`\n",
+        config.artifact_dir.root.display()
+    ));
+    content.push_str(&format!(
+        "- **Screenshots**: `{}`\n",
+        config.artifact_dir.screenshots.display()
+    ));
+    content.push_str(&format!(
+        "- **Logs**: `{}`\n",
+        config.artifact_dir.logs.display()
+    ));
     content.push_str("\nScreenshots, videos, downloaded files, and any other evidence should be saved to the appropriate directory above.\n");
 
     content
@@ -380,8 +391,14 @@ pub fn execute_steps(
                     let _ = writeln!(f);
                 }
                 let bootstrap_duration = bootstrap_start.elapsed();
-                tracing::info!(duration_ms = bootstrap_duration.as_millis() as u64, "bootstrap complete");
-                println!("OK ......... bootstrap ({:.1}s)", bootstrap_duration.as_secs_f64());
+                tracing::info!(
+                    duration_ms = bootstrap_duration.as_millis() as u64,
+                    "bootstrap complete"
+                );
+                println!(
+                    "OK ......... bootstrap ({:.1}s)",
+                    bootstrap_duration.as_secs_f64()
+                );
             }
             Err(e) => {
                 tracing::error!(error = %e, "bootstrap send failed");
@@ -413,7 +430,12 @@ pub fn execute_steps(
                     }
 
                     println!("RESTORE .... checkpoint \"{cp_id}\"");
-                    if let Err(e) = crate::command::run_checkpoint_command(&cp_config.restore, cp_id, project_root, cp_config.timeout_secs) {
+                    if let Err(e) = crate::command::run_checkpoint_command(
+                        &cp_config.restore,
+                        cp_id,
+                        project_root,
+                        cp_config.timeout_secs,
+                    ) {
                         println!("FAIL ....... checkpoint restore: {e}");
                         return Err(ExecutorError::CheckpointFailed(format!(
                             "restore \"{cp_id}\" failed: {e}"
@@ -436,7 +458,12 @@ pub fn execute_steps(
         let instruction_summary = truncate_instruction(&step.instruction, 60);
         let display_source = std::env::current_dir()
             .ok()
-            .and_then(|cwd| step.source_file.strip_prefix(&cwd).ok().map(|p| p.display().to_string()))
+            .and_then(|cwd| {
+                step.source_file
+                    .strip_prefix(&cwd)
+                    .ok()
+                    .map(|p| p.display().to_string())
+            })
             .unwrap_or_else(|| step.source_file.display().to_string());
 
         // Handle skipped steps
@@ -487,7 +514,8 @@ pub fn execute_steps(
         };
 
         // Per-step timeout overrides the test/config-level timeout
-        let effective_timeout = step.step_timeout_secs
+        let effective_timeout = step
+            .step_timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(timeout);
 
@@ -557,12 +585,18 @@ pub fn execute_steps(
         }
 
         // Auto-attach evidence refs for non-OK steps
-        let evidence_refs = if !step_result.is_pass() || matches!(&step_result, StepResult::Verdict(StepVerdict::Warn(_))) {
+        let evidence_refs = if !step_result.is_pass()
+            || matches!(&step_result, StepResult::Verdict(StepVerdict::Warn(_)))
+        {
             vec![EvidenceRef {
                 kind: EvidenceKind::CommandLog,
                 path: transcript_path.clone(),
                 description: format!("Step {} transcript", step.step_id),
-                collection_error: if transcript_path.exists() { None } else { Some("transcript file not written".to_string()) },
+                collection_error: if transcript_path.exists() {
+                    None
+                } else {
+                    Some("transcript file not written".to_string())
+                },
             }]
         } else {
             vec![]
@@ -584,9 +618,15 @@ pub fn execute_steps(
 
         // Save checkpoint after a passing step (not on failure)
         if !is_failure {
-            if let (Some(cp_config), Some(cp_id)) = (checkpoint_config, step.checkpoint.as_deref()) {
+            if let (Some(cp_config), Some(cp_id)) = (checkpoint_config, step.checkpoint.as_deref())
+            {
                 println!("SAVE ....... checkpoint \"{cp_id}\"");
-                if let Err(e) = crate::command::run_checkpoint_command(&cp_config.save, cp_id, project_root, cp_config.timeout_secs) {
+                if let Err(e) = crate::command::run_checkpoint_command(
+                    &cp_config.save,
+                    cp_id,
+                    project_root,
+                    cp_config.timeout_secs,
+                ) {
                     println!("FAIL ....... checkpoint save: {e}");
                     return Err(ExecutorError::CheckpointFailed(format!(
                         "save \"{cp_id}\" failed: {e}"
@@ -919,7 +959,11 @@ mod tests {
     }
 
     impl AgentSession for MockSession {
-        fn initialize(_config: &Config, _artifact_dir: &Path, _verbose: bool) -> Result<Self, ProviderError>
+        fn initialize(
+            _config: &Config,
+            _artifact_dir: &Path,
+            _verbose: bool,
+        ) -> Result<Self, ProviderError>
         where
             Self: Sized,
         {
@@ -1587,16 +1631,31 @@ mod tests {
         let (_tmp, artifact_dir) = test_artifact_dir();
 
         let mut session = MockSession::new(vec![vec![
-            Ok(OutputChunk::Text("RESULT ERROR: page not found".to_string())),
+            Ok(OutputChunk::Text(
+                "RESULT ERROR: page not found".to_string(),
+            )),
             Ok(OutputChunk::Done),
         ]]);
 
         let outcome = execute_steps(
-            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, None, std::path::Path::new("."), &AtomicBool::new(false),
-        ).unwrap();
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+            None,
+            None,
+            std::path::Path::new("."),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         assert_eq!(outcome.steps[0].evidence_refs.len(), 1);
-        assert_eq!(outcome.steps[0].evidence_refs[0].kind, crate::diagnostics::EvidenceKind::CommandLog);
+        assert_eq!(
+            outcome.steps[0].evidence_refs[0].kind,
+            crate::diagnostics::EvidenceKind::CommandLog
+        );
         assert!(outcome.steps[0].evidence_refs[0].collection_error.is_none());
     }
 
@@ -1612,8 +1671,18 @@ mod tests {
         ]]);
 
         let outcome = execute_steps(
-            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, None, std::path::Path::new("."), &AtomicBool::new(false),
-        ).unwrap();
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+            None,
+            None,
+            std::path::Path::new("."),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         assert_eq!(outcome.steps[0].evidence_refs.len(), 1);
     }
@@ -1630,8 +1699,18 @@ mod tests {
         ]]);
 
         let outcome = execute_steps(
-            &mut session, &steps, &run_id, &session_id, &artifact_dir, None, None, None, std::path::Path::new("."), &AtomicBool::new(false),
-        ).unwrap();
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+            None,
+            None,
+            std::path::Path::new("."),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         assert!(outcome.steps[0].evidence_refs.is_empty());
     }
@@ -1788,7 +1867,8 @@ mod tests {
         assert!(bootstrap_path.is_file());
 
         // Full transcript should contain bootstrap section
-        let full = std::fs::read_to_string(artifact_dir.transcripts.join("full_transcript.txt")).unwrap();
+        let full =
+            std::fs::read_to_string(artifact_dir.transcripts.join("full_transcript.txt")).unwrap();
         assert!(full.contains("=== Bootstrap ==="));
     }
 
