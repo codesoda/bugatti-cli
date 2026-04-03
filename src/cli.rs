@@ -14,6 +14,7 @@ Exit codes:
   3  Provider startup or readiness failure
   4  Step execution timeout
   5  Run was interrupted (Ctrl+C)
+  6  Setup command failed
 "
 )]
 pub struct Cli {
@@ -43,6 +44,11 @@ pub enum Commands {
         /// When set, runs with only warnings exit non-zero (exit code 1).
         #[arg(long)]
         strict_warnings: bool,
+
+        /// Resume from a named checkpoint: automatically skip all steps up to and
+        /// including the step with this checkpoint, restore it, then execute the rest.
+        #[arg(long = "from-checkpoint")]
+        from_checkpoint: Option<String>,
 
         /// Enable verbose output: show full prompts, provider command lines, and timing details.
         #[arg(long, short)]

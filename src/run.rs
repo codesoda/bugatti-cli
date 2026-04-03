@@ -20,7 +20,9 @@ impl Default for RunId {
 
 impl RunId {
     pub fn new() -> Self {
-        Self(Uuid::new_v4().to_string())
+        let now = Utc::now();
+        let suffix = &Uuid::new_v4().to_string()[..4];
+        Self(format!("{}-{}", now.format("%Y%m%d-%H%M%S-%3f"), suffix))
     }
 }
 
@@ -235,6 +237,7 @@ mod tests {
                 base_url: None,
             },
             commands,
+            checkpoint: None,
         }
     }
 

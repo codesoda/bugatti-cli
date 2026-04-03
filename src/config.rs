@@ -11,6 +11,21 @@ pub struct Config {
     pub provider: ProviderConfig,
     #[serde(default)]
     pub commands: BTreeMap<String, CommandDef>,
+    #[serde(default)]
+    pub checkpoint: Option<CheckpointConfig>,
+}
+
+/// Checkpoint save/restore command configuration.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointConfig {
+    /// Command to save a checkpoint (receives BUGATTI_CHECKPOINT_ID and BUGATTI_CHECKPOINT_PATH).
+    pub save: String,
+    /// Command to restore a checkpoint (receives BUGATTI_CHECKPOINT_ID and BUGATTI_CHECKPOINT_PATH).
+    pub restore: String,
+    /// Timeout in seconds for save/restore commands (default: 120).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Provider-level settings.
@@ -127,6 +142,7 @@ pub fn effective_config(global: &Config, test_file: &crate::test_file::TestFile)
     Config {
         provider,
         commands: global.commands.clone(),
+        checkpoint: global.checkpoint.clone(),
     }
 }
 
@@ -268,6 +284,7 @@ readiness_url = "http://localhost:3000/health"
                 base_url: None,
             },
             commands: BTreeMap::new(),
+            checkpoint: None,
         };
         let test_file = TestFile {
             name: "test".to_string(),
@@ -310,6 +327,7 @@ readiness_url = "http://localhost:3000/health"
                 base_url: None,
             },
             commands: BTreeMap::new(),
+            checkpoint: None,
         };
         let test_file = TestFile {
             name: "test".to_string(),
@@ -348,6 +366,7 @@ readiness_url = "http://localhost:3000/health"
                 base_url: None,
             },
             commands: BTreeMap::new(),
+            checkpoint: None,
         };
         let test_file = TestFile {
             name: "test".to_string(),
@@ -359,6 +378,7 @@ readiness_url = "http://localhost:3000/health"
                 include_glob: None,
                 step_timeout_secs: None,
                 skip: false,
+                checkpoint: None,
             }],
         };
 
@@ -404,6 +424,7 @@ step_timeout_secs = 600
                 ..ProviderConfig::default()
             },
             commands: BTreeMap::new(),
+            checkpoint: None,
         };
         let test_file = TestFile {
             name: "test".to_string(),
@@ -429,6 +450,7 @@ step_timeout_secs = 600
                 ..ProviderConfig::default()
             },
             commands: BTreeMap::new(),
+            checkpoint: None,
         };
         let test_file = TestFile {
             name: "test".to_string(),
@@ -470,6 +492,7 @@ strict_warnings = true
                 ..ProviderConfig::default()
             },
             commands: BTreeMap::new(),
+            checkpoint: None,
         };
         let test_file = TestFile {
             name: "test".to_string(),
@@ -515,6 +538,7 @@ base_url = "http://localhost:3000"
                 ..ProviderConfig::default()
             },
             commands: BTreeMap::new(),
+            checkpoint: None,
         };
         let test_file = TestFile {
             name: "test".to_string(),
@@ -543,6 +567,7 @@ base_url = "http://localhost:3000"
                 ..ProviderConfig::default()
             },
             commands: BTreeMap::new(),
+            checkpoint: None,
         };
         let test_file = TestFile {
             name: "test".to_string(),

@@ -49,6 +49,9 @@ pub struct Step {
     /// If true, this step is skipped during execution (counts as passed).
     #[serde(default)]
     pub skip: bool,
+    /// Optional checkpoint name — saved after this step passes, restored if this step is skipped.
+    #[serde(default)]
+    pub checkpoint: Option<String>,
 }
 
 /// Error type for test file parsing.

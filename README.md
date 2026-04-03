@@ -26,19 +26,23 @@ Manual QA doesn't scale. Traditional E2E test frameworks are brittle and expensi
 
 ## Install
 
-### From source (requires Rust)
+### Pre-built binary (macOS arm64)
 
 ```sh
 curl -sSf https://raw.githubusercontent.com/codesoda/bugatti-cli/main/install.sh | sh
 ```
 
-### From a clone
+Downloads the latest release binary from GitHub.
+
+### From a clone (requires Rust)
 
 ```sh
 git clone https://github.com/codesoda/bugatti-cli.git
 cd bugatti-cli
 sh install.sh
 ```
+
+Builds from source with `cargo build --release`.
 
 ## Quick Start
 
@@ -93,6 +97,13 @@ cmd = "npm run db:migrate"
 kind = "long_lived"
 cmd = "npm start"
 readiness_url = "http://localhost:3000/health"
+
+# Multiple readiness URLs and custom timeout
+[commands.docker-stack]
+kind = "long_lived"
+cmd = "docker compose up"
+readiness_urls = ["http://localhost:3000/health", "http://localhost:5432"]
+readiness_timeout_secs = 120
 ```
 
 ### Provider Settings
@@ -111,7 +122,15 @@ readiness_url = "http://localhost:3000/health"
 | Kind | Behavior |
 |------|----------|
 | `short_lived` | Runs to completion before tests start. Fails the run on non-zero exit. |
-| `long_lived` | Spawns in the background. Optional `readiness_url` is polled until ready. Torn down after tests complete. |
+| `long_lived` | Spawns in the background. Optional `readiness_url`/`readiness_urls` polled until ready. Torn down after tests complete. |
+
+#### Long-lived command options
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `readiness_url` | — | Single URL to poll before the command is considered ready |
+| `readiness_urls` | `[]` | Multiple URLs to poll (all must respond) |
+| `readiness_timeout_secs` | `30` | How long to wait for readiness before failing |
 
 ### CLI Flags
 
@@ -120,6 +139,7 @@ readiness_url = "http://localhost:3000/health"
 | `--strict-warnings` | Treat WARN results as failures (overrides config) |
 | `--skip-cmd <name>` | Skip a configured command |
 | `--skip-readiness <name>` | Skip readiness check for a command |
+| `--from-checkpoint <name>` | Resume from a named checkpoint (auto-skips earlier steps, restores state) |
 
 ## Test Files
 
@@ -133,10 +153,65 @@ Test files are TOML with a `.test.toml` extension. Each step must have exactly o
 | `include_path` | Path to another test file to inline |
 | `include_glob` | Glob pattern to inline multiple test files |
 | `step_timeout_secs` | Per-step timeout override (seconds) |
+| `skip` | If `true`, step is skipped (counts as passed) |
+| `checkpoint` | Checkpoint name — saves state after pass, restores if skipped |
 
-### Shared Test Files
+### Includes and Shared Test Files
 
-Prefix with `_` to exclude from discovery. Other tests pull them in via `include_path`:
+Steps can include other test files inline using `include_path` or `include_glob`. The included file's steps are expanded in place, creating a flat step list for execution.
+
+#### Single file include
+
+```toml
+# login.test.toml
+name = "Login flow"
+
+[[steps]]
+include_path = "_setup.test.toml"
+
+[[steps]]
+instruction = "Navigate to /login and submit credentials"
+
+[[steps]]
+instruction = "Verify redirect to dashboard"
+```
+
+The steps from `_setup.test.toml` are inserted at position 1, before the login steps. Paths are relative to the including file's directory.
+
+#### Glob include
+
+Include multiple files matching a glob pattern. Matched files are sorted alphabetically for deterministic order.
+
+```toml
+# full-suite.test.toml
+name = "Full test suite"
+
+[[steps]]
+include_path = "_setup.test.toml"
+
+[[steps]]
+include_glob = "features/*.test.toml"
+```
+
+This includes `_setup.test.toml` first, then all `*.test.toml` files under `features/` in alphabetical order.
+
+#### Shared files with `_` prefix
+
+Files prefixed with `_` are excluded from automatic discovery (`bugatti test` without a path argument). This lets you create reusable building blocks that are only executed when included by other test files.
+
+```
+project/
+  bugatti.config.toml
+  _setup.test.toml          # shared — not discovered
+  _teardown.test.toml       # shared — not discovered
+  login.test.toml            # discovered — includes _setup
+  checkout.test.toml         # discovered — includes _setup
+  features/
+    _auth-helpers.test.toml  # shared — not discovered
+    signup.test.toml          # discovered
+```
+
+Example shared setup file:
 
 ```toml
 # _setup.test.toml
@@ -144,18 +219,45 @@ name = "Shared setup"
 
 [[steps]]
 instruction = "Verify the health endpoint returns 200"
+
+[[steps]]
+instruction = "Clear test data from the database"
 ```
+
+#### Nested includes
+
+Included files can include other files. Bugatti expands everything into a flat step list with sequential IDs.
 
 ```toml
-# smoke.test.toml
-name = "Smoke test"
+# _auth.test.toml
+name = "Auth helpers"
 
 [[steps]]
-include_path = "_setup.test.toml"
+instruction = "Log in as test user"
 
 [[steps]]
-instruction = "Verify the homepage renders"
+include_path = "_verify-session.test.toml"
 ```
+
+#### Cycle detection
+
+Bugatti detects circular includes and fails with a clear error showing the chain:
+
+```
+include cycle detected: root.test.toml -> auth.test.toml -> root.test.toml
+```
+
+#### Provenance
+
+Each step tracks which file it came from. The console output shows this:
+
+```
+STEP 1/5 ... Verify health endpoint (from _setup.test.toml)
+STEP 2/5 ... Clear test data (from _setup.test.toml)
+STEP 3/5 ... Navigate to /login (from login.test.toml)
+```
+
+This makes it easy to identify which file to edit when a step fails.
 
 ### Per-Test Overrides
 
@@ -168,6 +270,271 @@ name = "Custom provider test"
 extra_system_prompt = "Be concise"
 step_timeout_secs = 600
 base_url = "http://localhost:5000"
+```
+
+### Skipping Steps
+
+Add `skip = true` to any step to bypass it during execution. Skipped steps count as passed, take zero time, and do not send anything to the agent.
+
+```toml
+[[steps]]
+instruction = "Create account and complete onboarding"
+skip = true
+
+[[steps]]
+instruction = "Configure billing with test card"
+skip = true
+
+[[steps]]
+instruction = "Invite team member and verify email"
+```
+
+**Console output** when steps are skipped:
+
+```
+SKIP 1/3 ... Create account and complete onboarding (from ftue.test.toml)
+SKIP 2/3 ... Configure billing with test card (from ftue.test.toml)
+STEP 3/3 ... Invite team member and verify email (from ftue.test.toml)
+```
+
+**When to use skip:**
+
+- **Iterative development** — you've run the full suite and steps 1-4 pass. Now you're working on step 5. Mark 1-4 as `skip = true` so each run goes straight to step 5 without re-executing the passing steps.
+- **Focusing on a failing step** — a step deep in the suite fails. Skip everything before it to iterate faster on the fix.
+- **Pairing with checkpoints** — skip steps that set up state, and use checkpoints to restore that state instead (see below).
+
+**Disabling a skip** — remove the line or comment it out with `#`:
+
+```toml
+[[steps]]
+instruction = "Create account and complete onboarding"
+#skip = true
+```
+
+**Important:** skipping a step does not undo its effects. If steps 1-3 set up database state and you skip them, that state won't exist unless you either run them first or restore it via a checkpoint.
+
+### Checkpoints
+
+Checkpoints save and restore external state (databases, files, services) at step boundaries. Combined with `skip = true`, they let you jump to any point in a test suite without re-executing earlier steps.
+
+#### The problem checkpoints solve
+
+A 10-step FTUE (first-time user experience) test takes 15 minutes. Step 8 fails. You fix the code and re-run, but steps 1-7 execute again — another 12 minutes wasted. With checkpoints, you run once, save state after step 7, then on subsequent runs skip steps 1-7 and restore the checkpoint. Step 8 runs immediately against the saved state.
+
+#### Setup
+
+**1. Add a `[checkpoint]` section to `bugatti.config.toml`:**
+
+```toml
+[checkpoint]
+save = "./scripts/checkpoint.sh save"
+restore = "./scripts/checkpoint.sh restore"
+timeout_secs = 180   # optional, default 120s
+```
+
+The `save` and `restore` fields are shell commands. They receive environment variables telling them which checkpoint to operate on.
+
+**2. Add `checkpoint = "name"` to steps in your test file:**
+
+```toml
+name = "FTUE: Full onboarding flow"
+
+[[steps]]
+instruction = "Create account via signup form"
+checkpoint = "after-signup"
+
+[[steps]]
+instruction = "Complete onboarding wizard"
+checkpoint = "after-onboarding"
+
+[[steps]]
+instruction = "Configure billing with test card"
+checkpoint = "after-billing"
+
+[[steps]]
+instruction = "Invite team member"
+
+[[steps]]
+instruction = "Verify team member received invite email"
+```
+
+Checkpoint names must be unique within a test file. Not every step needs a checkpoint — place them at meaningful state boundaries.
+
+#### How save works
+
+When a **non-skipped** step with `checkpoint` passes, bugatti runs the save command immediately after:
+
+```
+STEP 1/5 ... Create account via signup form (from ftue.test.toml)
+  OK 1/5 (23.4s)
+SAVE ....... checkpoint "after-signup"
+OK ......... checkpoint "after-signup" saved
+STEP 2/5 ... Complete onboarding wizard (from ftue.test.toml)
+  OK 2/5 (45.1s)
+SAVE ....... checkpoint "after-onboarding"
+OK ......... checkpoint "after-onboarding" saved
+```
+
+Checkpoints are **not saved** when a step fails — there's no point saving broken state.
+
+#### How restore works
+
+When you mark steps as `skip = true`, bugatti looks at the skipped steps to find the **last checkpoint** before the first non-skipped step, then runs the restore command:
+
+```toml
+[[steps]]
+instruction = "Create account via signup form"
+checkpoint = "after-signup"
+skip = true
+
+[[steps]]
+instruction = "Complete onboarding wizard"
+checkpoint = "after-onboarding"
+skip = true
+
+[[steps]]
+instruction = "Configure billing with test card"
+checkpoint = "after-billing"
+skip = true
+
+[[steps]]
+instruction = "Invite team member"
+
+[[steps]]
+instruction = "Verify team member received invite email"
+```
+
+Console output:
+
+```
+SKIP 1/5 ... Create account via signup form (from ftue.test.toml)
+SKIP 2/5 ... Complete onboarding wizard (from ftue.test.toml)
+SKIP 3/5 ... Configure billing with test card (from ftue.test.toml)
+RESTORE .... checkpoint "after-billing"
+OK ......... checkpoint "after-billing" restored
+STEP 4/5 ... Invite team member (from ftue.test.toml)
+```
+
+Only the **last** checkpoint is restored — restoring "after-billing" already includes the state from "after-signup" and "after-onboarding".
+
+#### Gap warning
+
+If you skip steps **after** the last checkpoint, bugatti warns you that the restored state may be incomplete:
+
+```toml
+[[steps]]
+instruction = "Create account via signup form"
+checkpoint = "after-signup"
+skip = true
+
+[[steps]]
+instruction = "Complete onboarding wizard"
+skip = true                                    # no checkpoint!
+
+[[steps]]
+instruction = "Configure billing with test card"
+skip = true                                    # no checkpoint!
+
+[[steps]]
+instruction = "Invite team member"
+```
+
+```
+WARN ....... restoring checkpoint "after-signup" from step 1, but 2 step(s) after it were also skipped without checkpoints
+RESTORE .... checkpoint "after-signup"
+OK ......... checkpoint "after-signup" restored
+STEP 4/5 ... Invite team member (from ftue.test.toml)
+```
+
+This means steps 2-3 were skipped but their effects aren't captured in the restored checkpoint. The test may fail because of missing state. Either add checkpoints to those steps or accept the gap.
+
+#### Environment variables
+
+Save and restore commands receive these environment variables:
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `BUGATTI_CHECKPOINT_ID` | `after-onboarding` | The checkpoint name from the step |
+| `BUGATTI_CHECKPOINT_PATH` | `.bugatti/checkpoints/after-onboarding/` | Directory for this checkpoint's data |
+
+The checkpoint directory is created automatically before the command runs. Your script decides what to put in it.
+
+#### Checkpoint config reference
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `save` | *required* | Shell command to save a checkpoint |
+| `restore` | *required* | Shell command to restore a checkpoint |
+| `timeout_secs` | `120` | Timeout for save/restore commands (kills process on expiry) |
+
+#### Example checkpoint script
+
+A checkpoint script that saves and restores a PostgreSQL database and an uploads directory:
+
+```bash
+#!/bin/bash
+set -eu
+action="${1:?usage: checkpoint.sh save|restore}"
+
+case "$action" in
+  save)
+    pg_dump myapp_dev > "$BUGATTI_CHECKPOINT_PATH/db.sql"
+    cp -r ./uploads "$BUGATTI_CHECKPOINT_PATH/uploads"
+    echo "Saved DB + uploads for checkpoint $BUGATTI_CHECKPOINT_ID"
+    ;;
+  restore)
+    dropdb --if-exists myapp_dev
+    createdb myapp_dev
+    psql -d myapp_dev -f "$BUGATTI_CHECKPOINT_PATH/db.sql"
+    rm -rf ./uploads
+    cp -r "$BUGATTI_CHECKPOINT_PATH/uploads" ./uploads
+    echo "Restored DB + uploads for checkpoint $BUGATTI_CHECKPOINT_ID"
+    ;;
+esac
+```
+
+#### Disabling checkpoints
+
+Comment out the checkpoint line on individual steps:
+
+```toml
+[[steps]]
+instruction = "Create account via signup form"
+#checkpoint = "after-signup"
+```
+
+Or remove the `[checkpoint]` section from `bugatti.config.toml` — steps with `checkpoint` will be ignored if no save/restore commands are configured.
+
+#### Resuming from a checkpoint via CLI
+
+Instead of manually adding `skip = true` to steps, use `--from-checkpoint`:
+
+```bash
+# Resume from the "after-billing" checkpoint — skips steps 1-3 automatically
+bugatti test ftue.test.toml --from-checkpoint after-billing
+```
+
+This auto-skips all steps up to and including the step with `checkpoint = "after-billing"`, restores the checkpoint, and executes the remaining steps. No need to edit the TOML file.
+
+If the checkpoint name doesn't exist, bugatti lists the available checkpoints:
+
+```
+ERROR: checkpoint "typo" not found. Available: after-signup, after-onboarding, after-billing
+```
+
+#### Typical workflow
+
+```bash
+# 1. First run — all steps execute, checkpoints saved at each boundary
+bugatti test ftue.test.toml
+
+# 2. Step 4 fails. Fix the code.
+
+# 3. Re-run from the last checkpoint before step 4
+bugatti test ftue.test.toml --from-checkpoint after-billing
+
+# 4. Step 4 passes. Do a clean run to confirm everything works end-to-end.
+bugatti test ftue.test.toml
 ```
 
 ## Examples
@@ -189,8 +556,9 @@ Working examples in [`examples/`](examples/):
 | `1` | One or more steps failed |
 | `2` | Configuration or parse error |
 | `3` | Provider or readiness failure |
-| `4` | Run interrupted (Ctrl+C) |
-| `5` | Step timed out |
+| `4` | Step timed out |
+| `5` | Run interrupted (Ctrl+C) |
+| `6` | Setup command failed |
 
 ## License
 
