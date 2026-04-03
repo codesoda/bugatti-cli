@@ -54,8 +54,28 @@ impl Default for ProviderConfig {
 pub struct CommandDef {
     pub kind: CommandKind,
     pub cmd: String,
+    /// Single readiness URL (convenience shorthand — mutually exclusive with `readiness_urls`).
     #[serde(default)]
     pub readiness_url: Option<String>,
+    /// Multiple readiness URLs to poll before the command is considered ready.
+    #[serde(default)]
+    pub readiness_urls: Vec<String>,
+    /// Timeout in seconds for readiness polling (default: 30).
+    #[serde(default)]
+    pub readiness_timeout_secs: Option<u64>,
+}
+
+impl CommandDef {
+    /// Return the effective list of readiness URLs, merging `readiness_url` and `readiness_urls`.
+    pub fn effective_readiness_urls(&self) -> Vec<&str> {
+        let mut urls: Vec<&str> = self.readiness_urls.iter().map(|s| s.as_str()).collect();
+        if let Some(ref url) = self.readiness_url {
+            if !urls.iter().any(|u| *u == url.as_str()) {
+                urls.insert(0, url.as_str());
+            }
+        }
+        urls
+    }
 }
 
 /// Whether a command is short-lived (run to completion) or long-lived (background process).
@@ -338,6 +358,7 @@ readiness_url = "http://localhost:3000/health"
                 include_path: None,
                 include_glob: None,
                 step_timeout_secs: None,
+                skip: false,
             }],
         };
 

@@ -17,6 +17,8 @@ pub struct ExpandedStep {
     pub parent_chain: Vec<PathBuf>,
     /// Optional per-step timeout override in seconds.
     pub step_timeout_secs: Option<u64>,
+    /// If true, this step is skipped during execution.
+    pub skip: bool,
 }
 
 /// Error type for step expansion.
@@ -107,6 +109,7 @@ fn expand_steps_inner(
                 source_step_index: i,
                 parent_chain: parent_chain.to_vec(),
                 step_timeout_secs: step.step_timeout_secs,
+                skip: step.skip,
             });
             *step_id += 1;
         } else if let Some(ref include_path) = step.include_path {

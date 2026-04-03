@@ -237,6 +237,7 @@ pub struct BootstrapConfig<'a> {
     pub test_file: &'a str,
     pub extra_system_prompt: Option<&'a str>,
     pub base_url: Option<&'a str>,
+    pub artifact_dir: &'a ArtifactDir,
 }
 
 /// Build the bootstrap message content sent to the provider at session start.
@@ -285,6 +286,14 @@ pub fn build_bootstrap_content(
         content.push_str(&format!("- Base URL: {}\n", base_url));
         content.push_str("\nAll URLs in step instructions are relative to the Base URL unless a full URL (with host) is provided.\n");
     }
+
+    // Artifact directories
+    content.push_str("\n## Artifacts\n\n");
+    content.push_str("Save any files produced during the test run to these directories:\n\n");
+    content.push_str(&format!("- **Root**: `{}`\n", config.artifact_dir.root.display()));
+    content.push_str(&format!("- **Screenshots**: `{}`\n", config.artifact_dir.screenshots.display()));
+    content.push_str(&format!("- **Logs**: `{}`\n", config.artifact_dir.logs.display()));
+    content.push_str("\nScreenshots, videos, downloaded files, and any other evidence should be saved to the appropriate directory above.\n");
 
     content
 }
@@ -385,16 +394,39 @@ pub fn execute_steps(
 
         // Print step begin
         let instruction_summary = truncate_instruction(&step.instruction, 60);
+        let display_source = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| step.source_file.strip_prefix(&cwd).ok().map(|p| p.display().to_string()))
+            .unwrap_or_else(|| step.source_file.display().to_string());
+
+        // Handle skipped steps
+        if step.skip {
+            println!(
+                "SKIP {}/{} ... {} (from {})",
+                step.step_id + 1,
+                total_steps,
+                instruction_summary,
+                display_source
+            );
+            outcomes.push(StepOutcome {
+                step_id: step.step_id,
+                instruction: step.instruction.clone(),
+                source_file: step.source_file.clone(),
+                result: StepResult::Verdict(StepVerdict::Ok),
+                transcript: String::new(),
+                log_events: vec![],
+                evidence_refs: vec![],
+                duration: Duration::ZERO,
+            });
+            continue;
+        }
+
         tracing::info!(
             step_id = step.step_id,
             total = total_steps,
             source = %step.source_file.display(),
             "step execution begin"
         );
-        let display_source = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| step.source_file.strip_prefix(&cwd).ok().map(|p| p.display().to_string()))
-            .unwrap_or_else(|| step.source_file.display().to_string());
         println!(
             "STEP {}/{} ... {} (from {})",
             step.step_id + 1,
@@ -880,6 +912,7 @@ mod tests {
                 source_step_index: 0,
                 parent_chain: vec![],
                 step_timeout_secs: None,
+                skip: false,
             },
             ExpandedStep {
                 step_id: 1,
@@ -888,6 +921,7 @@ mod tests {
                 source_step_index: 1,
                 parent_chain: vec![],
                 step_timeout_secs: None,
+                skip: false,
             },
         ]
     }
@@ -1522,11 +1556,13 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_includes_result_contract() {
+        let (_tmp, artifact_dir) = test_artifact_dir();
         let config = BootstrapConfig {
             test_name: "Login test",
             test_file: "tests/login.test.toml",
             extra_system_prompt: None,
             base_url: None,
+            artifact_dir: &artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1540,11 +1576,13 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_includes_test_metadata() {
+        let (_tmp, artifact_dir) = test_artifact_dir();
         let config = BootstrapConfig {
             test_name: "Login test",
             test_file: "tests/login.test.toml",
             extra_system_prompt: None,
             base_url: None,
+            artifact_dir: &artifact_dir,
         };
         let run_id = RunId("run-abc".to_string());
         let session_id = SessionId("sess-xyz".to_string());
@@ -1559,11 +1597,13 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_includes_extra_system_prompt() {
+        let (_tmp, artifact_dir) = test_artifact_dir();
         let config = BootstrapConfig {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: Some("Be concise and thorough"),
             base_url: None,
+            artifact_dir: &artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1578,11 +1618,13 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_omits_prompt_when_none() {
+        let (_tmp, artifact_dir) = test_artifact_dir();
         let config = BootstrapConfig {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: None,
+            artifact_dir: &artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1594,11 +1636,13 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_includes_base_url() {
+        let (_tmp, artifact_dir) = test_artifact_dir();
         let config = BootstrapConfig {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: Some("http://localhost:3000"),
+            artifact_dir: &artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1608,11 +1652,13 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_omits_base_url_when_none() {
+        let (_tmp, artifact_dir) = test_artifact_dir();
         let config = BootstrapConfig {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: None,
+            artifact_dir: &artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1636,6 +1682,7 @@ mod tests {
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: None,
+            artifact_dir: &artifact_dir,
         };
 
         let _outcome = execute_steps(

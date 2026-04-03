@@ -11,7 +11,8 @@ use bugatti::diagnostics;
 use bugatti::discovery::{discover_root_tests, DiscoveredTest};
 use bugatti::executor;
 use bugatti::exit_code::{
-    self, EXIT_CONFIG_ERROR, EXIT_INTERRUPTED, EXIT_OK, EXIT_PROVIDER_ERROR, EXIT_STEP_ERROR,
+    self, EXIT_CONFIG_ERROR, EXIT_INTERRUPTED, EXIT_OK, EXIT_PROVIDER_ERROR, EXIT_SETUP_ERROR,
+    EXIT_STEP_ERROR,
 };
 use bugatti::expand;
 use bugatti::provider::AgentSession;
@@ -343,7 +344,7 @@ fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::Ex
     // Phase 8: Run short-lived setup commands
     if let Err(e) = command::run_short_lived_commands(ctx.effective, ctx.artifact_dir, ctx.skip_cmds) {
         tracing::error!(error = %e, "short-lived command failed");
-        return ctx.fail_early(EXIT_CONFIG_ERROR, format!("setup command failed: {e}"), &mut no_processes);
+        return ctx.fail_early(EXIT_SETUP_ERROR, format!("setup command failed: {e}"), &mut no_processes);
     }
 
     // Phase 9: Spawn long-lived commands
@@ -388,6 +389,7 @@ fn run_test_with_artifacts(ctx: &PipelineContext, steps: Vec<bugatti::expand::Ex
         test_file: &ctx.test_path.display().to_string(),
         extra_system_prompt: ctx.effective.provider.extra_system_prompt.as_deref(),
         base_url: ctx.effective.provider.base_url.as_deref(),
+        artifact_dir: ctx.artifact_dir,
     };
     let step_timeout = ctx.effective.provider.step_timeout_secs
         .map(std::time::Duration::from_secs);

@@ -1,11 +1,12 @@
 #!/bin/sh
 # install.sh — Bugatti CLI installer.
 #
-# Builds from source (requires Rust/Cargo) and installs the binary.
+# When run via curl|sh, downloads the pre-built binary from GitHub Releases.
+# When run from a repo checkout, builds from source (requires Rust/Cargo).
 #
 # Usage:
 #   curl -sSf https://raw.githubusercontent.com/codesoda/bugatti-cli/main/install.sh | sh
-#   ./install.sh [options]       # from a repo checkout
+#   ./install.sh [options]       # from a repo checkout (builds from source)
 #
 # Options:
 #   --skip-symlink      Skip creating ~/.local/bin symlink
@@ -142,41 +143,64 @@ trap cleanup EXIT INT TERM
 INSTALLED_BINARY=""
 SOURCE_ROOT=""
 
-# --- Resolve source tree ---
+# --- Detect architecture ---
 
-resolve_source_root() {
-    # If invoked from a repo checkout, use it directly
-    script_dir="$(cd "$(dirname "$0")" && pwd)"
-    if [ -f "$script_dir/Cargo.toml" ] && [ -d "$script_dir/src" ]; then
-        SOURCE_ROOT="$script_dir"
-        return 0
-    fi
+detect_target() {
+    os="$(uname -s)"
+    arch="$(uname -m)"
 
-    # Download source archive
+    case "$os" in
+        Darwin) ;;
+        *) die "Pre-built binaries are only available for macOS (got $os). Build from a clone instead." ;;
+    esac
+
+    case "$arch" in
+        arm64|aarch64) echo "aarch64-apple-darwin" ;;
+        *) die "Pre-built binaries are only available for arm64 (got $arch). Build from a clone instead." ;;
+    esac
+}
+
+# --- Install from GitHub release ---
+
+install_from_release() {
     if ! command -v curl >/dev/null 2>&1; then
         die "curl is required for remote install"
     fi
 
-    info "Downloading source from GitHub..."
+    target="$(detect_target)"
+
+    header "Fetching latest release"
+
+    # Get the latest release tag
+    latest_url="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest"
+    tag="$(curl -sSf "$latest_url" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+    if [ -z "$tag" ]; then
+        die "Could not determine latest release — check https://github.com/$REPO_OWNER/$REPO_NAME/releases"
+    fi
+    ok_detail "Release" "$tag"
+
+    asset_name="bugatti-${tag}-${target}.tar.gz"
+    asset_url="https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/${tag}/${asset_name}"
+
     TMP_DIR="$(mktemp -d)"
-    archive_url="https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$REPO_REF.tar.gz"
+    info "Downloading $asset_name..."
+    if ! curl -sSfL "$asset_url" -o "$TMP_DIR/$asset_name"; then
+        die "Failed to download $asset_url"
+    fi
+    ok "Downloaded"
 
-    if ! curl -sSL "$archive_url" | tar xz -C "$TMP_DIR" 2>/dev/null; then
-        die "Failed to download source from $archive_url"
+    tar xzf "$TMP_DIR/$asset_name" -C "$TMP_DIR"
+    downloaded_binary="$TMP_DIR/bugatti-${tag}-${target}/bugatti"
+    if [ ! -f "$downloaded_binary" ]; then
+        die "Archive does not contain expected binary"
     fi
 
-    extracted="$TMP_DIR/$REPO_NAME-$REPO_REF"
-    if [ ! -f "$extracted/Cargo.toml" ]; then
-        die "Downloaded archive does not contain expected source tree"
-    fi
-
-    SOURCE_ROOT="$extracted"
+    install_binary "$downloaded_binary"
 }
 
-# --- Build from source ---
+# --- Build from local source ---
 
 build_from_source() {
-    resolve_source_root
     ok_detail "Source tree" "$SOURCE_ROOT"
 
     header "Checking prerequisites"
@@ -196,8 +220,13 @@ build_from_source() {
     fi
 
     ok_detail "Built" "$built_binary"
+    install_binary "$built_binary"
+}
 
-    # Install to ~/.<home>/bin — use symlink for local checkouts, copy otherwise
+# --- Install binary to BUGATTI_HOME ---
+
+install_binary() {
+    src_binary="$1"
     bugatti_home="${BUGATTI_HOME:-$HOME/.bugatti}"
     bin_dir="$bugatti_home/bin"
     mkdir -p "$bin_dir"
@@ -209,7 +238,7 @@ build_from_source() {
         rm "$target_path"
     fi
 
-    cp "$built_binary" "$target_path"
+    cp "$src_binary" "$target_path"
     chmod +x "$target_path"
     ok_detail "Installed" "$target_path"
 
@@ -277,7 +306,14 @@ main() {
     dim "━━━━━━━━━━━━━━━━━"
     printf '\n'
 
-    build_from_source
+    # If running from a repo checkout, build locally; otherwise grab the release binary
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    if [ -f "$script_dir/Cargo.toml" ] && [ -d "$script_dir/src" ]; then
+        SOURCE_ROOT="$script_dir"
+        build_from_source
+    else
+        install_from_release
+    fi
 
     if [ "$SKIP_SYMLINK" = 0 ]; then
         ensure_local_bin_symlink || true
