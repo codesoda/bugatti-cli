@@ -1,0 +1,58 @@
+---
+title: bugatti
+description: Write tests in plain English. An AI agent runs them.
+template: splash
+hero:
+  tagline: Write test steps in plain English. An AI agent executes them. You get structured pass/fail results.
+  actions:
+    - text: Get Started
+      link: /getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/codesoda/bugatti-cli
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## How it works
+
+<CardGrid stagger>
+  <Card title="Write steps in plain English" icon="pencil">
+    Describe *what* to test in a `.test.toml` file. No selectors, no page objects, no test framework DSL.
+  </Card>
+  <Card title="An AI agent runs them" icon="rocket">
+    Bugatti drives an AI coding agent through your test plan. The agent figures out *how* to verify each step.
+  </Card>
+  <Card title="Get structured results" icon="approve-check">
+    Every step reports `OK`, `WARN`, or `ERROR`. Full transcripts, logs, and reports saved per run.
+  </Card>
+  <Card title="Built-in infrastructure" icon="setting">
+    Setup commands, long-lived servers with readiness polling, state checkpoints, composable test files.
+  </Card>
+</CardGrid>
+
+## Quick example
+
+```toml
+# login.test.toml
+name = "Login flow"
+
+[[steps]]
+instruction = "Navigate to /login and verify the page loads"
+
+[[steps]]
+instruction = "Enter valid credentials and submit the form"
+
+[[steps]]
+instruction = "Verify you are redirected to the dashboard"
+```
+
+```sh
+bugatti test login.test.toml
+```
+
+## Why?
+
+Manual QA doesn't scale. Traditional E2E test frameworks are brittle and expensive to maintain. Bugatti sits in between — you describe *what* to test in natural language, and an AI agent handles the *how*.

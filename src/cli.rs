@@ -15,6 +15,8 @@ Exit codes:
   4  Step execution timeout
   5  Run was interrupted (Ctrl+C)
   6  Setup command failed
+
+Docs: https://bugatti.dev/llms.txt
 "
 )]
 pub struct Cli {
@@ -25,6 +27,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Run tests from a *.test.toml file or discover all root test files
+    #[command(after_help = "Docs: https://bugatti.dev/llms/cli-reference.txt")]
     Test {
         /// Path to a specific .test.toml file to run
         path: Option<String>,

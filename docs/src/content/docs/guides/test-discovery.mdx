@@ -1,0 +1,48 @@
+---
+title: Test Discovery
+description: How bugatti finds and runs test files automatically.
+---
+
+Run `bugatti test` with no path argument to discover and run all test files in your project.
+
+## How it works
+
+Bugatti recursively searches for all `*.test.toml` files starting from the current directory. It skips:
+
+- **`_`-prefixed files** — files like `_setup.test.toml` are treated as include-only building blocks
+- **Hidden directories** — directories starting with `.` (like `.git`, `.bugatti`) are ignored
+- **`node_modules`** and similar dependency directories
+
+## Example
+
+```
+project/
+  bugatti.config.toml
+  _setup.test.toml          # skipped (include-only)
+  login.test.toml            # discovered
+  checkout.test.toml         # discovered
+  features/
+    _auth-helpers.test.toml  # skipped (include-only)
+    signup.test.toml          # discovered
+    billing.test.toml         # discovered
+```
+
+```sh
+bugatti test
+```
+
+This discovers and runs: `login.test.toml`, `checkout.test.toml`, `features/signup.test.toml`, `features/billing.test.toml`.
+
+## Running a specific test
+
+Pass a path to run a single test file:
+
+```sh
+bugatti test login.test.toml
+```
+
+This bypasses discovery entirely — you can even run `_`-prefixed files directly:
+
+```sh
+bugatti test _setup.test.toml
+```

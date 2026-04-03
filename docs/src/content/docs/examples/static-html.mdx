@@ -1,0 +1,60 @@
+---
+title: Static HTML
+description: Testing a local HTML page with browser automation.
+---
+
+The simplest example — test a static HTML page with no server. The agent opens the file directly in a browser.
+
+**Source:** [`examples/static-html/`](https://github.com/codesoda/bugatti-cli/tree/main/examples/static-html)
+
+## Config
+
+```toml
+# bugatti.config.toml
+
+[provider]
+extra_system_prompt = "Use a headed browser for UI tests."
+agent_args = [
+    "--dangerously-skip-permissions",
+    "--no-session-persistence",
+    "--model", "haiku",
+    "--effort", "medium",
+]
+```
+
+No commands section — there's nothing to start. The agent opens `index.html` directly.
+
+## Test file
+
+```toml
+# smoke.test.toml
+name = "Static site smoke test"
+
+[[steps]]
+instruction = "Open index.html in the browser. Verify the page title is 'Bugatti Example - Static Site' and the heading 'Welcome to the Example Site' is visible."
+
+[[steps]]
+instruction = "Verify the navigation bar contains three links: Home, About, and Contact."
+
+[[steps]]
+instruction = "Click the 'Contact' nav link. Verify the contact form is visible with Name, Email, and Message fields."
+
+[[steps]]
+instruction = "Submit the contact form with all fields empty. Verify that validation error messages appear."
+
+[[steps]]
+instruction = "Fill in the contact form with valid data and submit. Verify the success message 'Thank you! Your message has been sent.' appears."
+```
+
+## Run it
+
+```sh
+cd examples/static-html
+bugatti test
+```
+
+## Key takeaways
+
+- No config file is strictly required for the simplest case — but the `extra_system_prompt` telling the agent to use a browser is helpful
+- Steps describe UI interactions in plain English
+- The agent handles browser automation, form filling, and assertion checking

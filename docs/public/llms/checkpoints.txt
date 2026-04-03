@@ -1,0 +1,84 @@
+# bugatti — Checkpoints
+
+Save and restore external state (databases, files) at step boundaries. Combined with skip, jump to any point without re-running earlier steps.
+
+## Setup
+
+1. Add [checkpoint] to bugatti.config.toml:
+
+  [checkpoint]
+  save = "./scripts/checkpoint.sh save"
+  restore = "./scripts/checkpoint.sh restore"
+  timeout_secs = 180
+
+2. Add checkpoint to steps:
+
+  [[steps]]
+  instruction = "Create account via signup form"
+  checkpoint = "after-signup"
+
+  [[steps]]
+  instruction = "Complete onboarding wizard"
+  checkpoint = "after-onboarding"
+
+  [[steps]]
+  instruction = "Configure billing with test card"
+  checkpoint = "after-billing"
+
+  [[steps]]
+  instruction = "Invite team member"
+
+## Save Behavior
+
+When a non-skipped step with checkpoint passes, the save command runs immediately after:
+  STEP 1/5 ... Create account via signup form
+    OK 1/5 (23.4s)
+  SAVE ....... checkpoint "after-signup"
+  OK ......... checkpoint "after-signup" saved
+
+Not saved when a step fails.
+
+## Restore Behavior
+
+When skipped steps have checkpoints, bugatti restores the LAST checkpoint before the first non-skipped step. Only one restore happens.
+
+## --from-checkpoint CLI
+
+  bugatti test ftue.test.toml --from-checkpoint after-billing
+
+Auto-skips all steps up to and including the checkpoint step, restores, runs the rest.
+No need to edit the TOML file.
+
+If name doesn't exist:
+  ERROR: checkpoint "typo" not found. Available: after-signup, after-onboarding, after-billing
+
+## Environment Variables
+
+Save/restore commands receive:
+  BUGATTI_CHECKPOINT_ID    — checkpoint name (e.g., "after-onboarding")
+  BUGATTI_CHECKPOINT_PATH  — directory for checkpoint data (auto-created)
+
+## Example Script (PostgreSQL + uploads)
+
+  #!/bin/bash
+  set -eu
+  action="${1:?usage: checkpoint.sh save|restore}"
+  case "$action" in
+    save)
+      pg_dump myapp_dev > "$BUGATTI_CHECKPOINT_PATH/db.sql"
+      cp -r ./uploads "$BUGATTI_CHECKPOINT_PATH/uploads"
+      ;;
+    restore)
+      dropdb --if-exists myapp_dev && createdb myapp_dev
+      psql -d myapp_dev -f "$BUGATTI_CHECKPOINT_PATH/db.sql"
+      rm -rf ./uploads && cp -r "$BUGATTI_CHECKPOINT_PATH/uploads" ./uploads
+      ;;
+  esac
+
+## Typical Workflow
+
+  bugatti test ftue.test.toml                          # full run, checkpoints saved
+  # step 4 fails, fix code
+  bugatti test ftue.test.toml --from-checkpoint after-billing  # resume
+  # step 4 passes
+  bugatti test ftue.test.toml                          # clean run to confirm

@@ -1,0 +1,43 @@
+# bugatti — Test File Reference
+
+File: *.test.toml
+
+## Schema
+
+  name = "Test name"                       # required
+
+  [overrides.provider]                     # optional
+  extra_system_prompt = "..."
+  step_timeout_secs = 600
+  base_url = "http://localhost:5000"
+
+  [[steps]]                                # at least one step required
+  instruction = "Plain English instruction"
+  step_timeout_secs = 300                  # optional per-step timeout
+  skip = true                              # optional skip
+  checkpoint = "checkpoint-name"           # optional checkpoint
+
+  [[steps]]
+  include_path = "path/to/file.test.toml"  # include single file
+
+  [[steps]]
+  include_glob = "features/*.test.toml"    # include by glob
+
+## Step Types
+
+Each step needs exactly one of: instruction, include_path, include_glob.
+
+Instruction step fields:
+  instruction        string   required  Plain-English instruction for the agent
+  step_timeout_secs  integer  optional  Override timeout for this step
+  skip               boolean  optional  Skip this step (counts as passed)
+  checkpoint         string   optional  Save state after pass, restore if skipped
+
+Include step fields:
+  include_path       string   Relative path to a test file to inline
+  include_glob       string   Glob pattern to inline multiple files (sorted alphabetically)
+
+## File Naming
+
+  *.test.toml   — discovered by `bugatti test`
+  _*.test.toml  — excluded from discovery (include-only)

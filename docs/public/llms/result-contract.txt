@@ -1,0 +1,45 @@
+# bugatti — Result Contract
+
+Every step must produce a result marker. This is the protocol between the agent and bugatti.
+
+## Markers
+
+  RESULT OK                          — step passed
+  RESULT WARN: <message>             — passed with caveats
+  RESULT ERROR: <message>            — step failed
+
+## Parsing
+
+Bugatti searches BACKWARDS for the last RESULT line in agent output.
+Free-form reasoning before the marker is allowed.
+No marker or timeout = protocol error = step fails.
+
+## Exit Code Impact
+
+  RESULT OK     → exit 0
+  RESULT WARN   → exit 0 (or exit 1 with --strict-warnings)
+  RESULT ERROR  → exit 1
+
+## Timeouts
+
+If no result within step_timeout_secs (default 300), the agent is killed.
+Exit code 4.
+
+## Agent Logging
+
+  BUGATTI_LOG Created test user with id=42
+
+Displayed as: LOG ........ Created test user with id=42
+Captured separately in run artifacts.
+
+## Run Artifacts
+
+Saved to .bugatti/runs/<run_id>/:
+  metadata.json      — run config, timestamps
+  report.md          — human-readable summary
+  transcripts/       — full agent output per step
+  screenshots/       — evidence from agent
+  logs/              — BUGATTI_LOG entries
+  diagnostics/       — structured tracing data
+
+Run ID format: YYYYMMDD-HHMMSS-fff-XXXX (timestamp + 4-char suffix)

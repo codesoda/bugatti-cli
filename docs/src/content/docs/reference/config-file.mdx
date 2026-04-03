@@ -1,0 +1,63 @@
+---
+title: Config File Reference
+description: Complete schema for bugatti.config.toml.
+---
+
+The config file is optional. If present, it must be named `bugatti.config.toml` and located in the project root (the directory where you run `bugatti`).
+
+## Full schema
+
+```toml
+[provider]
+name = "claude-code"                    # Provider name (default: "claude-code")
+extra_system_prompt = "..."             # Additional context for the agent
+agent_args = ["--flag", "value"]        # Extra CLI args for the provider
+step_timeout_secs = 300                 # Default per-step timeout in seconds
+strict_warnings = false                 # Treat WARN as failure?
+base_url = "http://localhost:3000"      # Base URL for the app under test
+
+[commands.<name>]
+kind = "short_lived"                    # "short_lived" or "long_lived"
+cmd = "npm run migrate"                 # Shell command to run
+
+# Long-lived command additional fields:
+readiness_url = "http://localhost:3000/health"   # Single readiness URL
+readiness_urls = ["http://...", "http://..."]     # Multiple readiness URLs
+readiness_timeout_secs = 30                       # Readiness timeout (default: 30)
+
+[checkpoint]
+save = "./scripts/checkpoint.sh save"   # Save command (required if section present)
+restore = "./scripts/checkpoint.sh restore"  # Restore command (required)
+timeout_secs = 120                      # Timeout for save/restore (default: 120)
+```
+
+## [provider]
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | `"claude-code"` | Provider to use |
+| `extra_system_prompt` | string | — | Additional system prompt for the agent |
+| `agent_args` | string[] | `[]` | Extra CLI args passed to the provider |
+| `step_timeout_secs` | integer | `300` | Default timeout per step (seconds) |
+| `strict_warnings` | boolean | `false` | Treat WARN results as failures |
+| `base_url` | string | — | Base URL for the app under test |
+
+## [commands.\<name\>]
+
+Define as many commands as needed. The name is used with `--skip-cmd` and `--skip-readiness`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `kind` | string | yes | `"short_lived"` or `"long_lived"` |
+| `cmd` | string | yes | Shell command to execute |
+| `readiness_url` | string | no | Single URL to poll (long-lived only) |
+| `readiness_urls` | string[] | no | Multiple URLs to poll (long-lived only) |
+| `readiness_timeout_secs` | integer | no | Readiness timeout, default 30 (long-lived only) |
+
+## [checkpoint]
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `save` | string | *required* | Shell command to save a checkpoint |
+| `restore` | string | *required* | Shell command to restore a checkpoint |
+| `timeout_secs` | integer | `120` | Timeout for save/restore commands |

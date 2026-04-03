@@ -1,0 +1,51 @@
+# bugatti — Config File Reference
+
+File: bugatti.config.toml (project root, optional)
+
+## [provider]
+
+  name               string   "claude-code"  Provider to use
+  extra_system_prompt string   —              Additional context for the agent
+  agent_args         string[] []             Extra CLI args for the provider
+  step_timeout_secs  integer  300            Default timeout per step (seconds)
+  strict_warnings    boolean  false          Treat WARN as failures
+  base_url           string   —              Base URL for the app under test
+
+## [commands.<name>]
+
+  kind                    string   required  "short_lived" or "long_lived"
+  cmd                     string   required  Shell command to execute
+  readiness_url           string   —         Single URL to poll (long_lived only)
+  readiness_urls          string[] —         Multiple URLs to poll (long_lived only)
+  readiness_timeout_secs  integer  30        How long to wait for readiness
+
+## [checkpoint]
+
+  save         string   required  Shell command to save checkpoint
+  restore      string   required  Shell command to restore checkpoint
+  timeout_secs integer  120       Timeout for save/restore (seconds)
+
+## Full Example
+
+  [provider]
+  name = "claude-code"
+  extra_system_prompt = "Use the browser for UI tests."
+  agent_args = ["--dangerously-skip-permissions"]
+  step_timeout_secs = 300
+  strict_warnings = true
+  base_url = "http://localhost:3000"
+
+  [commands.install]
+  kind = "short_lived"
+  cmd = "pnpm install"
+
+  [commands.server]
+  kind = "long_lived"
+  cmd = "npm start"
+  readiness_url = "http://localhost:3000/health"
+  readiness_timeout_secs = 60
+
+  [checkpoint]
+  save = "./scripts/checkpoint.sh save"
+  restore = "./scripts/checkpoint.sh restore"
+  timeout_secs = 180

@@ -1,0 +1,25 @@
+# bugatti — Examples
+
+Working examples in the repo: https://github.com/codesoda/bugatti-cli/tree/main/examples
+
+## Static HTML (examples/static-html/)
+No server. Agent opens index.html in a browser and tests navigation, forms, validation.
+Config: extra_system_prompt for browser testing, no commands section.
+
+## Node + Express (examples/node-express/)
+TypeScript Express server with API and UI tests.
+Features: pnpm install (short-lived), server with readiness polling, shared _setup.test.toml via include_path, multi-port testing (3111 main, 3112 admin).
+
+## Python + Flask (examples/python-flask/)
+Flask API and UI with strict_warnings enabled.
+Features: pip install (short-lived), Flask server with /health readiness, separate api.test.toml and ui.test.toml.
+
+## Rust CLI (examples/rust-cli/)
+CLI tool testing — no server.
+Features: cargo build (short-lived), per-step timeout override, tests CLI args, stdout/stderr, and exit codes.
+
+## Running an Example
+
+  git clone https://github.com/codesoda/bugatti-cli.git
+  cd bugatti-cli/examples/static-html
+  bugatti test

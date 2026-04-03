@@ -1,0 +1,173 @@
+---
+title: Checkpoints
+description: Save and restore state to skip re-running earlier steps.
+---
+
+Checkpoints save and restore external state (databases, files, services) at step boundaries. Combined with `skip = true`, they let you jump to any point in a test suite without re-executing earlier steps.
+
+## The problem
+
+A 10-step test takes 15 minutes. Step 8 fails. You fix the code and re-run, but steps 1-7 execute again — another 12 minutes wasted. With checkpoints, you run once, save state after step 7, then on subsequent runs skip steps 1-7 and restore the checkpoint. Step 8 runs immediately against the saved state.
+
+## Setup
+
+### 1. Add a checkpoint section to config
+
+```toml
+# bugatti.config.toml
+[checkpoint]
+save = "./scripts/checkpoint.sh save"
+restore = "./scripts/checkpoint.sh restore"
+timeout_secs = 180   # optional, default 120s
+```
+
+### 2. Add checkpoints to steps
+
+```toml
+name = "FTUE: Full onboarding flow"
+
+[[steps]]
+instruction = "Create account via signup form"
+checkpoint = "after-signup"
+
+[[steps]]
+instruction = "Complete onboarding wizard"
+checkpoint = "after-onboarding"
+
+[[steps]]
+instruction = "Configure billing with test card"
+checkpoint = "after-billing"
+
+[[steps]]
+instruction = "Invite team member"
+
+[[steps]]
+instruction = "Verify team member received invite email"
+```
+
+Checkpoint names must be unique within a test file. Place them at meaningful state boundaries — not every step needs one.
+
+## How save works
+
+When a non-skipped step with `checkpoint` passes, bugatti runs the save command:
+
+```
+STEP 1/5 ... Create account via signup form (from ftue.test.toml)
+  OK 1/5 (23.4s)
+SAVE ....... checkpoint "after-signup"
+OK ......... checkpoint "after-signup" saved
+```
+
+Checkpoints are not saved when a step fails.
+
+## How restore works
+
+When skipped steps have checkpoints, bugatti restores the **last checkpoint** before the first non-skipped step:
+
+```toml
+[[steps]]
+instruction = "Create account via signup form"
+checkpoint = "after-signup"
+skip = true
+
+[[steps]]
+instruction = "Complete onboarding wizard"
+checkpoint = "after-onboarding"
+skip = true
+
+[[steps]]
+instruction = "Configure billing with test card"
+checkpoint = "after-billing"
+skip = true
+
+[[steps]]
+instruction = "Invite team member"
+```
+
+```
+SKIP 1/5 ... Create account via signup form
+SKIP 2/5 ... Complete onboarding wizard
+SKIP 3/5 ... Configure billing with test card
+RESTORE .... checkpoint "after-billing"
+OK ......... checkpoint "after-billing" restored
+STEP 4/5 ... Invite team member
+```
+
+Only "after-billing" is restored — it already includes the state from earlier checkpoints.
+
+## Resume from CLI
+
+Instead of manually adding `skip = true`, use `--from-checkpoint`:
+
+```sh
+bugatti test ftue.test.toml --from-checkpoint after-billing
+```
+
+This auto-skips all steps up to and including the checkpoint step, restores the checkpoint, and runs the rest. No need to edit the TOML file.
+
+If the name doesn't exist, bugatti lists the available checkpoints:
+
+```
+ERROR: checkpoint "typo" not found. Available: after-signup, after-onboarding, after-billing
+```
+
+## Gap warning
+
+If you skip steps after the last checkpoint, bugatti warns that restored state may be incomplete:
+
+```
+WARN ....... restoring checkpoint "after-signup" from step 1,
+             but 2 step(s) after it were also skipped without checkpoints
+```
+
+## Environment variables
+
+Save and restore commands receive:
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `BUGATTI_CHECKPOINT_ID` | `after-onboarding` | The checkpoint name |
+| `BUGATTI_CHECKPOINT_PATH` | `.bugatti/checkpoints/after-onboarding/` | Directory for checkpoint data |
+
+The directory is created automatically. Your script decides what to put in it.
+
+## Example checkpoint script
+
+Save and restore a PostgreSQL database and uploads directory:
+
+```bash
+#!/bin/bash
+set -eu
+action="${1:?usage: checkpoint.sh save|restore}"
+
+case "$action" in
+  save)
+    pg_dump myapp_dev > "$BUGATTI_CHECKPOINT_PATH/db.sql"
+    cp -r ./uploads "$BUGATTI_CHECKPOINT_PATH/uploads"
+    echo "Saved DB + uploads for checkpoint $BUGATTI_CHECKPOINT_ID"
+    ;;
+  restore)
+    dropdb --if-exists myapp_dev
+    createdb myapp_dev
+    psql -d myapp_dev -f "$BUGATTI_CHECKPOINT_PATH/db.sql"
+    rm -rf ./uploads
+    cp -r "$BUGATTI_CHECKPOINT_PATH/uploads" ./uploads
+    echo "Restored DB + uploads for checkpoint $BUGATTI_CHECKPOINT_ID"
+    ;;
+esac
+```
+
+## Typical workflow
+
+```sh
+# 1. First run — all steps execute, checkpoints saved at each boundary
+bugatti test ftue.test.toml
+
+# 2. Step 4 fails. Fix the code.
+
+# 3. Re-run from the last checkpoint before step 4
+bugatti test ftue.test.toml --from-checkpoint after-billing
+
+# 4. Step 4 passes. Clean run to confirm everything works end-to-end.
+bugatti test ftue.test.toml
+```

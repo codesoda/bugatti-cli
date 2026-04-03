@@ -1,0 +1,15 @@
+# bugatti — Exit Codes
+
+  0  All steps passed (OK or WARN)
+  1  One or more steps had ERROR results
+  2  Configuration, parse, or cycle error
+  3  Provider startup or readiness failure
+  4  Step execution timeout
+  5  Run interrupted (Ctrl+C)
+  6  Setup command failed (short-lived command exited non-zero)
+
+Notes:
+- With --strict-warnings, WARN-only runs exit 1 instead of 0
+- Exit 2 covers TOML parse errors, include cycles, invalid config
+- Exit 3 when readiness URL doesn't respond within timeout
+- Exit 5 tears down long-lived processes before exiting

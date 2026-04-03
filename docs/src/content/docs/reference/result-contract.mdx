@@ -1,0 +1,64 @@
+---
+title: Result Contract
+description: How the agent reports step results back to bugatti.
+---
+
+Every step must produce a result marker. This is the protocol between the agent and the bugatti harness.
+
+## Result markers
+
+The agent emits one of these at the end of its work for each step:
+
+```
+RESULT OK
+RESULT WARN: <message>
+RESULT ERROR: <message>
+```
+
+| Marker | Meaning | Exit code impact |
+|--------|---------|-----------------|
+| `RESULT OK` | Step passed | 0 |
+| `RESULT WARN: <msg>` | Passed with caveats | 0 (or 1 with `--strict-warnings`) |
+| `RESULT ERROR: <msg>` | Step failed | 1 |
+
+## How bugatti parses results
+
+Bugatti searches **backwards** through the agent's output for the last `RESULT` line. This means:
+
+- The agent can output free-form reasoning before the marker
+- Only the final `RESULT` line counts
+- If no marker is found, it's a protocol error and the step fails
+
+## Timeouts
+
+If the agent doesn't produce a result within the step timeout (default 300s, configurable per-step or globally), bugatti kills the agent process and records a timeout failure (exit code 4).
+
+## Agent logging
+
+The agent can emit structured log lines during execution:
+
+```
+BUGATTI_LOG Created test user with id=42
+BUGATTI_LOG Screenshot saved to /tmp/login-page.png
+```
+
+These are:
+- Displayed in the console as `LOG ........ <message>`
+- Captured separately from the full transcript in run artifacts
+- Useful for tracing what the agent did without reading the full output
+
+## Run artifacts
+
+Each run saves artifacts to `.bugatti/runs/<run_id>/`:
+
+```
+.bugatti/runs/20260403-141523-001-a1b2/
+├── metadata.json      # Run config, test file, timestamps
+├── report.md          # Human-readable summary
+├── transcripts/       # Full agent output per step
+├── screenshots/       # Evidence captured by agent
+├── logs/              # BUGATTI_LOG entries
+└── diagnostics/       # Structured tracing data
+```
+
+The run ID format is `YYYYMMDD-HHMMSS-fff-XXXX` (timestamp + 4-char suffix for uniqueness).

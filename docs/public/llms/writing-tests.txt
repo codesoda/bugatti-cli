@@ -1,0 +1,62 @@
+# bugatti — Writing Tests
+
+Test files are TOML with a .test.toml extension.
+
+## Structure
+
+  name = "Login flow"
+
+  [[steps]]
+  instruction = "Navigate to /login and verify the page loads"
+
+  [[steps]]
+  instruction = "Enter valid credentials and submit the form"
+
+  [[steps]]
+  instruction = "Verify you are redirected to the dashboard"
+
+## Step Fields
+
+Each step needs exactly one of: instruction, include_path, include_glob.
+
+Optional fields on any step:
+  step_timeout_secs = 300    # per-step timeout override
+  skip = true                # skip this step
+  checkpoint = "name"        # save/restore state boundary
+
+## Writing Good Instructions
+
+Describe WHAT to verify, not HOW. Be specific about expected values.
+
+Good:  "Make a GET request to /api/items and verify it returns a JSON array with 3 items"
+Bad:   "Check the API"
+Bad:   "Run curl -s http://localhost:3000/api/items | jq length"
+
+Tips:
+- One assertion per step
+- Steps run in order within a single agent session — state carries forward
+- Be specific about expected values ("3 items", "status 200", "contains 'Welcome'")
+
+## Result Contract
+
+Every step must produce a result marker:
+  RESULT OK
+  RESULT WARN: Items returned but order was unexpected
+  RESULT ERROR: Expected 3 items but got 0
+
+Bugatti searches backwards for the last RESULT line in agent output.
+No marker or timeout = protocol error = step fails.
+
+## Agent Logging
+
+  BUGATTI_LOG Created test user with id=42
+
+Captured in run artifacts, displayed as: LOG ........ <message>
+
+## Per-Step Timeout
+
+  [[steps]]
+  instruction = "Run the full migration suite"
+  step_timeout_secs = 600
+
+Default is from bugatti.config.toml (or 300s).

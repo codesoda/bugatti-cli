@@ -1,0 +1,40 @@
+# bugatti
+
+> Write test steps in plain English. An AI agent executes them. You get structured pass/fail results.
+> Bugatti is a CLI test harness that drives AI coding agents through test plans defined in TOML files.
+
+## Docs
+
+- [Getting Started](https://bugatti.dev/llms/getting-started.txt): Install bugatti and run your first test
+- [Writing Tests](https://bugatti.dev/llms/writing-tests.txt): The .test.toml format and how to write good steps
+- [Configuration](https://bugatti.dev/llms/configuration.txt): bugatti.config.toml — provider settings, commands, checkpoints
+- [Commands](https://bugatti.dev/llms/commands.txt): Short-lived and long-lived commands with readiness polling
+- [Includes](https://bugatti.dev/llms/includes.txt): Compose tests from reusable building blocks
+- [Skipping](https://bugatti.dev/llms/skipping.txt): Skip steps for faster iteration
+- [Checkpoints](https://bugatti.dev/llms/checkpoints.txt): Save and restore state between test runs
+- [Test Discovery](https://bugatti.dev/llms/test-discovery.txt): How bugatti finds test files automatically
+- [Per-Test Overrides](https://bugatti.dev/llms/per-test-overrides.txt): Override settings per test file
+- [CLI Reference](https://bugatti.dev/llms/cli-reference.txt): Complete CLI flags and usage
+- [Config Reference](https://bugatti.dev/llms/config-reference.txt): Full bugatti.config.toml schema
+- [Test File Reference](https://bugatti.dev/llms/test-file-reference.txt): Full .test.toml schema
+- [Result Contract](https://bugatti.dev/llms/result-contract.txt): RESULT OK/WARN/ERROR protocol and artifacts
+- [Exit Codes](https://bugatti.dev/llms/exit-codes.txt): What each exit code means
+- [Examples](https://bugatti.dev/llms/examples.txt): Working example projects
+
+## Quick Start
+
+Install:
+  curl -sSf https://raw.githubusercontent.com/codesoda/bugatti-cli/main/install.sh | sh
+
+Create a test file (smoke.test.toml):
+  name = "Smoke test"
+  [[steps]]
+  instruction = "Create a file called hello.txt with 'Hello, world!'"
+  [[steps]]
+  instruction = "Read hello.txt and verify it contains 'Hello, world!'"
+
+Run it:
+  bugatti test smoke.test.toml
+
+Discover and run all tests:
+  bugatti test

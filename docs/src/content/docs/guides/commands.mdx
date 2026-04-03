@@ -1,0 +1,115 @@
+---
+title: Commands
+description: Setup commands and long-lived servers with readiness polling.
+---
+
+Commands let bugatti manage your project's infrastructure — run migrations, start servers, wait for them to be ready, and tear them down when tests finish.
+
+## Short-lived commands
+
+Short-lived commands run to completion before tests start. Use them for setup tasks like installing dependencies, running migrations, or building artifacts.
+
+```toml
+[commands.install]
+kind = "short_lived"
+cmd = "pnpm install"
+
+[commands.migrate]
+kind = "short_lived"
+cmd = "npm run db:migrate"
+
+[commands.build]
+kind = "short_lived"
+cmd = "cargo build"
+```
+
+If a short-lived command exits with a non-zero code, the run fails immediately (exit code 6).
+
+## Long-lived commands
+
+Long-lived commands spawn in the background and stay running while tests execute. Bugatti tears them down after tests complete.
+
+```toml
+[commands.server]
+kind = "long_lived"
+cmd = "npm start"
+```
+
+### Readiness polling
+
+Wait for a server to be ready before running tests:
+
+```toml
+[commands.server]
+kind = "long_lived"
+cmd = "npm start"
+readiness_url = "http://localhost:3000/health"
+```
+
+Bugatti sends HTTP GET requests to the URL and waits for a successful response. If the server isn't ready within the timeout, the run fails (exit code 3).
+
+### Multiple readiness URLs
+
+For multi-service setups, poll multiple endpoints:
+
+```toml
+[commands.docker-stack]
+kind = "long_lived"
+cmd = "docker compose up"
+readiness_urls = ["http://localhost:3000/health", "http://localhost:5432"]
+readiness_timeout_secs = 120
+```
+
+All URLs must respond before tests start.
+
+### Long-lived command options
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `readiness_url` | — | Single URL to poll |
+| `readiness_urls` | `[]` | Multiple URLs to poll (all must respond) |
+| `readiness_timeout_secs` | `30` | How long to wait for readiness |
+
+## Skipping commands via CLI
+
+Skip a command without removing it from config:
+
+```sh
+# Skip the install command (don't run pnpm install)
+bugatti test --skip-cmd install
+
+# Skip multiple commands
+bugatti test --skip-cmd install --skip-cmd migrate
+```
+
+Readiness checks for skipped commands still run by default. To skip those too:
+
+```sh
+bugatti test --skip-cmd server --skip-readiness server
+```
+
+This is useful when your server is already running during development.
+
+## Multiple commands
+
+You can define as many commands as you need. Short-lived commands run first (in declaration order), then long-lived commands are spawned:
+
+```toml
+[commands.install]
+kind = "short_lived"
+cmd = "pnpm install"
+
+[commands.migrate]
+kind = "short_lived"
+cmd = "npm run db:migrate"
+
+[commands.server]
+kind = "long_lived"
+cmd = "npm start"
+readiness_url = "http://localhost:3000/health"
+
+[commands.worker]
+kind = "long_lived"
+cmd = "npm run worker"
+readiness_url = "http://localhost:4000/health"
+```

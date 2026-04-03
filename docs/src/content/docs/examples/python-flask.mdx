@@ -1,0 +1,84 @@
+---
+title: Python + Flask
+description: Testing a Flask API and UI with readiness polling and strict warnings.
+---
+
+A Flask app with API and UI tests, demonstrating readiness polling, strict warnings, and separate test files for API vs UI.
+
+**Source:** [`examples/python-flask/`](https://github.com/codesoda/bugatti-cli/tree/main/examples/python-flask)
+
+## Config
+
+```toml
+# bugatti.config.toml
+
+[provider]
+strict_warnings = true
+extra_system_prompt = "This is a Python Flask app. Use curl for API tests. Use a browser for UI tests."
+base_url = "http://localhost:5111"
+agent_args = [
+    "--dangerously-skip-permissions",
+    "--no-session-persistence",
+    "--model", "haiku",
+    "--effort", "medium",
+]
+
+[commands.install]
+kind = "short_lived"
+cmd = "pip3 install -r requirements.txt"
+
+[commands.server]
+kind = "long_lived"
+cmd = "python3 app.py"
+readiness_url = "http://localhost:5111/health"
+```
+
+Key features:
+- **`strict_warnings = true`** — WARN results are treated as failures
+- **pip install** as a short-lived setup command
+- **Readiness polling** on the `/health` endpoint
+
+## API tests
+
+```toml
+# api.test.toml
+name = "Flask API tests"
+
+[[steps]]
+instruction = "Make a GET request to /health and verify the response JSON contains {\"status\": \"ok\"}."
+
+[[steps]]
+instruction = "Make a GET request to /api/items and verify it returns a JSON array with 3 items."
+
+[[steps]]
+instruction = "Make a GET request to /api/items/1 and verify it returns the Widget item with price 9.99."
+
+[[steps]]
+instruction = "Make a GET request to /api/items/999 and verify it returns a 404 status with an error message."
+```
+
+## UI tests
+
+```toml
+# ui.test.toml
+name = "Flask UI tests"
+
+[[steps]]
+instruction = "Open / in the browser. Verify the page title is 'Item Store' and the heading is visible."
+
+[[steps]]
+instruction = "Verify that the page displays a list of 3 items with their names and prices."
+```
+
+## Run it
+
+```sh
+cd examples/python-flask
+bugatti test
+```
+
+## Key takeaways
+
+- **strict_warnings** makes the test suite fail-fast on ambiguous results
+- Separate test files for **API** and **UI** concerns keeps things organized
+- The same server serves both the API endpoints and the HTML UI

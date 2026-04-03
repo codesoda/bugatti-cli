@@ -1,0 +1,89 @@
+---
+title: Configuration
+description: How to configure bugatti with bugatti.config.toml.
+---
+
+Create `bugatti.config.toml` in your project root. This file is optional — bugatti works without it for simple tests.
+
+## Minimal config
+
+```toml
+[provider]
+base_url = "http://localhost:3000"
+```
+
+## Full example
+
+```toml
+[provider]
+name = "claude-code"
+extra_system_prompt = "Use the browser for UI tests."
+agent_args = ["--dangerously-skip-permissions"]
+step_timeout_secs = 300
+strict_warnings = true
+base_url = "http://localhost:3000"
+
+[commands.migrate]
+kind = "short_lived"
+cmd = "npm run db:migrate"
+
+[commands.server]
+kind = "long_lived"
+cmd = "npm start"
+readiness_url = "http://localhost:3000/health"
+
+[checkpoint]
+save = "./scripts/checkpoint.sh save"
+restore = "./scripts/checkpoint.sh restore"
+timeout_secs = 180
+```
+
+## Provider settings
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `name` | `"claude-code"` | Provider to use |
+| `extra_system_prompt` | — | Additional context for the agent |
+| `agent_args` | `[]` | Extra CLI args passed to the provider |
+| `step_timeout_secs` | `300` | Default timeout per step (seconds) |
+| `strict_warnings` | `false` | Treat WARN results as failures |
+| `base_url` | — | Base URL for the app under test |
+
+### extra_system_prompt
+
+Use this to give the agent context about your project:
+
+```toml
+[provider]
+extra_system_prompt = "This is a Python Flask app. Use curl for API tests. Use a browser for UI tests."
+```
+
+### agent_args
+
+Pass additional CLI arguments to the provider:
+
+```toml
+[provider]
+agent_args = ["--dangerously-skip-permissions", "--model", "haiku"]
+```
+
+### strict_warnings
+
+By default, `WARN` results count as passing (exit code 0). Set `strict_warnings = true` to treat them as failures (exit code 1). Can also be set via `--strict-warnings` CLI flag.
+
+### base_url
+
+Sets a base URL that the agent can use when steps reference relative paths:
+
+```toml
+[provider]
+base_url = "http://localhost:3000"
+```
+
+## Commands
+
+See the dedicated [Commands](/guides/commands/) guide.
+
+## Checkpoints
+
+See the dedicated [Checkpoints](/guides/checkpoints/) guide.

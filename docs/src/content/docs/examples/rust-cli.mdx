@@ -1,0 +1,68 @@
+---
+title: Rust CLI
+description: Testing a command-line tool built from source.
+---
+
+A Rust CLI tool example — bugatti builds the binary first, then tests it by running commands and checking output.
+
+**Source:** [`examples/rust-cli/`](https://github.com/codesoda/bugatti-cli/tree/main/examples/rust-cli)
+
+## Config
+
+```toml
+# bugatti.config.toml
+
+[provider]
+step_timeout_secs = 120
+agent_args = [
+    "--dangerously-skip-permissions",
+    "--no-session-persistence",
+    "--model", "haiku",
+    "--effort", "medium",
+]
+
+[commands.build]
+kind = "short_lived"
+cmd = "cargo build"
+```
+
+Key features:
+- **Short-lived build command** compiles the binary before tests run
+- **Lower step timeout** (120s) since CLI tests are fast
+- **No long-lived commands** — there's no server to start
+
+## Test file
+
+```toml
+# cli.test.toml
+name = "Greeter CLI tests"
+
+[[steps]]
+instruction = "Run the greeter binary with no arguments. Verify it prints a usage message to stderr and exits with a non-zero exit code."
+
+[[steps]]
+instruction = "Run the greeter binary with the argument 'World'. Verify it prints 'Hello, World!' to stdout."
+
+[[steps]]
+instruction = "Run the greeter binary with arguments 'Alice' and '--shout'. Verify it prints 'HELLO, ALICE!' to stdout."
+
+[[steps]]
+instruction = "Run the greeter binary with arguments 'Bob' and '--invalid'. Verify it prints an error message to stderr and exits with a non-zero exit code."
+step_timeout_secs = 30
+```
+
+Note the last step has its own `step_timeout_secs = 30` — overriding the global 120s since we know it should be fast.
+
+## Run it
+
+```sh
+cd examples/rust-cli
+bugatti test
+```
+
+## Key takeaways
+
+- **CLI testing** doesn't need a server — just a build step
+- The agent runs the binary, captures stdout/stderr, and checks exit codes
+- **Per-step timeout overrides** let you set tighter bounds on steps you know should be fast
+- `cargo build` as a short-lived command ensures a fresh binary before each test run

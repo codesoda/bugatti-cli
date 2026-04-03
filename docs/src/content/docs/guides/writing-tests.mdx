@@ -1,0 +1,107 @@
+---
+title: Writing Tests
+description: How to write test files with plain-English steps.
+---
+
+Test files are TOML files with a `.test.toml` extension. Each file has a name and a list of steps.
+
+## Basic structure
+
+```toml
+name = "Login flow"
+
+[[steps]]
+instruction = "Navigate to /login and verify the page loads"
+
+[[steps]]
+instruction = "Enter valid credentials and submit the form"
+
+[[steps]]
+instruction = "Verify you are redirected to the dashboard"
+```
+
+The `name` field identifies the test in console output and reports. Each `[[steps]]` entry is one step sent to the AI agent.
+
+## Writing good instructions
+
+Each step should describe *what* to verify, not *how*. The agent figures out the implementation.
+
+**Good:**
+```toml
+[[steps]]
+instruction = "Make a GET request to /api/items and verify it returns a JSON array with 3 items"
+```
+
+**Too vague:**
+```toml
+[[steps]]
+instruction = "Check the API"
+```
+
+**Too prescriptive:**
+```toml
+[[steps]]
+instruction = "Run curl -s http://localhost:3000/api/items | jq length and check it equals 3"
+```
+
+Tips:
+- Be specific about expected values ("3 items", "status 200", "contains 'Welcome'")
+- One assertion per step keeps results clear
+- Steps run in order within a single agent session — state carries forward
+
+## The result contract
+
+Every step must produce exactly one result. The agent emits a marker at the end of its work:
+
+```
+RESULT OK
+RESULT WARN: Items returned but order was unexpected
+RESULT ERROR: Expected 3 items but got 0
+```
+
+- **OK** — the step passed
+- **WARN** — something was off but not a hard failure
+- **ERROR** — the step failed
+
+Bugatti parses the last `RESULT` marker in the agent's output. If no marker is found (or the step times out), it's treated as a protocol error and the step fails.
+
+## Agent logging
+
+The agent can emit structured log lines during execution:
+
+```
+BUGATTI_LOG Created test user with id=42
+BUGATTI_LOG Screenshot saved to /tmp/login-page.png
+```
+
+These appear in the console output and are captured in the run artifacts, separate from the full transcript.
+
+## Per-step timeout
+
+Override the default timeout for a specific step:
+
+```toml
+[[steps]]
+instruction = "Run the full migration suite"
+step_timeout_secs = 600
+```
+
+The default is set in `bugatti.config.toml` (or 300 seconds if not configured).
+
+## What's in a step
+
+Each step must have exactly one of:
+
+| Field | Purpose |
+|-------|---------|
+| `instruction` | Plain-English instruction sent to the agent |
+| `include_path` | Path to another test file to inline (see [Includes](/guides/includes/)) |
+| `include_glob` | Glob pattern to inline multiple test files (see [Includes](/guides/includes/)) |
+
+Optional fields on any step:
+
+| Field | Purpose |
+|-------|---------|
+| `step_timeout_secs` | Per-step timeout override (seconds) |
+| `skip` | If `true`, step is skipped (see [Skipping](/guides/skipping/)) |
+| `checkpoint` | Checkpoint name (see [Checkpoints](/guides/checkpoints/)) |
