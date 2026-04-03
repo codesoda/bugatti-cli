@@ -1,0 +1,21 @@
+---
+title: Exit Codes
+description: What each bugatti exit code means.
+---
+
+| Code | Meaning |
+|------|---------|
+| `0` | All steps passed (OK or WARN) |
+| `1` | One or more steps had ERROR results |
+| `2` | Configuration, parse, or cycle error |
+| `3` | Provider startup or readiness failure |
+| `4` | Step execution timeout |
+| `5` | Run was interrupted (Ctrl+C) |
+| `6` | Setup command failed (short-lived command exited non-zero) |
+
+## Notes
+
+- With `--strict-warnings`, runs that have only WARN results exit with code 1 instead of 0.
+- Exit code 2 covers TOML parse errors, include cycle detection, and invalid config values.
+- Exit code 3 occurs when a long-lived command's readiness URL doesn't respond within the timeout.
+- Exit code 5 is returned when you press Ctrl+C during a run. Bugatti tears down long-lived processes before exiting.

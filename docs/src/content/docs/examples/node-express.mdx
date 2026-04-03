@@ -1,0 +1,110 @@
+---
+title: Node + Express
+description: Testing an Express TypeScript API with shared setup and multi-port servers.
+---
+
+A full-stack example with a TypeScript Express server, API tests, UI tests, shared setup via includes, and multi-port testing.
+
+**Source:** [`examples/node-express/`](https://github.com/codesoda/bugatti-cli/tree/main/examples/node-express)
+
+## Config
+
+```toml
+# bugatti.config.toml
+
+[provider]
+base_url = "http://localhost:3111"
+extra_system_prompt = "This is an Express.js TypeScript app. Use a browser for UI tests. Use curl or fetch for API tests."
+agent_args = [
+    "--dangerously-skip-permissions",
+    "--no-session-persistence",
+    "--model", "haiku",
+    "--effort", "medium",
+]
+
+[commands.install]
+kind = "short_lived"
+cmd = "pnpm install"
+
+[commands.server]
+kind = "long_lived"
+cmd = "npx tsx src/server.ts"
+readiness_url = "http://localhost:3111/health"
+```
+
+Key features:
+- **Short-lived command** installs dependencies before tests
+- **Long-lived command** starts the server and waits for `/health` to respond
+
+## Shared setup
+
+```toml
+# _setup.test.toml
+name = "Shared setup verification"
+
+[[steps]]
+instruction = "Make a GET request to /health and verify the response contains {\"status\": \"ok\"}. This confirms the server is running."
+```
+
+The `_` prefix means this file is not discovered on its own — it's only executed when included by other tests.
+
+## API tests
+
+```toml
+# api.test.toml
+name = "Express API tests"
+
+[[steps]]
+include_path = "_setup.test.toml"
+
+[[steps]]
+instruction = "Make a GET request to /api/todos and verify it returns a JSON array with 3 todos."
+
+[[steps]]
+instruction = "Make a POST request to /api/todos with JSON body {\"title\": \"Test todo\"} and verify it returns a 201 status."
+
+[[steps]]
+instruction = "Make a GET request to /api/todos again and verify there are now 4 todos."
+
+[[steps]]
+instruction = "Make a POST request to /api/todos with an empty JSON body {} and verify it returns a 400 status."
+
+[[steps]]
+instruction = "Make a GET request to http://localhost:3112/stats and verify it returns JSON with todo_count and uptime fields."
+```
+
+Note the last step tests a different port (3112) — the admin API.
+
+## UI tests
+
+```toml
+# ui.test.toml
+name = "Express UI tests"
+
+[[steps]]
+include_path = "_setup.test.toml"
+
+[[steps]]
+instruction = "Open / in the browser. Verify the page title is 'Todo App' and the heading 'Todo List' is visible."
+
+[[steps]]
+instruction = "Verify the page displays the initial 3 todos in a list."
+
+[[steps]]
+instruction = "Type 'New browser todo' into the input field and click the Add button. Verify the new todo appears in the list."
+```
+
+## Run it
+
+```sh
+cd examples/node-express
+bugatti test              # discovers and runs both api.test.toml and ui.test.toml
+bugatti test api.test.toml  # run just the API tests
+```
+
+## Key takeaways
+
+- **Shared setup** with `_setup.test.toml` avoids repeating the health check
+- **include_path** pulls shared steps into multiple test files
+- Tests can hit **multiple ports** — just use absolute URLs in the instruction
+- The `base_url` config makes relative URLs in steps resolve to `http://localhost:3111`

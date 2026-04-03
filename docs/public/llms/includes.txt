@@ -1,0 +1,43 @@
+# bugatti — Includes & Composition
+
+Steps can include other test files inline. Included steps are expanded in place into a flat step list.
+
+## Single File Include
+
+  [[steps]]
+  include_path = "_setup.test.toml"
+
+Paths are relative to the including file's directory.
+
+## Glob Include
+
+  [[steps]]
+  include_glob = "features/*.test.toml"
+
+Matched files are sorted alphabetically for deterministic order.
+
+## _ Prefix Convention
+
+Files prefixed with _ are excluded from discovery (bugatti test with no path).
+Use them as reusable building blocks included by other tests.
+
+  project/
+    _setup.test.toml          # not discovered, include-only
+    _teardown.test.toml       # not discovered, include-only
+    login.test.toml            # discovered, includes _setup
+    checkout.test.toml         # discovered, includes _setup
+
+## Nested Includes
+
+Included files can include other files. Everything expands to a flat step list.
+
+## Cycle Detection
+
+Circular includes fail with a clear error:
+  include cycle detected: root.test.toml -> auth.test.toml -> root.test.toml
+
+## Provenance
+
+Console output shows which file each step came from:
+  STEP 1/5 ... Verify health endpoint (from _setup.test.toml)
+  STEP 3/5 ... Navigate to /login (from login.test.toml)

@@ -1,0 +1,72 @@
+---
+title: Test File Reference
+description: Complete schema for .test.toml files.
+---
+
+Test files use TOML format with a `.test.toml` extension.
+
+## Full schema
+
+```toml
+name = "Test name"                       # Required: identifies the test
+
+[overrides.provider]                     # Optional: override provider settings
+extra_system_prompt = "..."
+step_timeout_secs = 600
+base_url = "http://localhost:5000"
+
+[[steps]]                                # At least one step required
+instruction = "Plain English instruction"
+step_timeout_secs = 300                  # Optional: per-step timeout
+skip = true                              # Optional: skip this step
+checkpoint = "checkpoint-name"           # Optional: save/restore state
+
+[[steps]]
+include_path = "path/to/file.test.toml"  # Include another file's steps
+
+[[steps]]
+include_glob = "features/*.test.toml"    # Include multiple files by glob
+```
+
+## Top-level fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Test name shown in console output and reports |
+
+## [overrides.provider]
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `extra_system_prompt` | string | Replaces global extra_system_prompt |
+| `step_timeout_secs` | integer | Replaces global step timeout |
+| `base_url` | string | Replaces global base URL |
+
+## [[steps]]
+
+Each step must have exactly one of `instruction`, `include_path`, or `include_glob`.
+
+### Instruction step
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `instruction` | string | yes* | Plain-English instruction sent to the agent |
+| `step_timeout_secs` | integer | no | Override timeout for this step |
+| `skip` | boolean | no | Skip this step (counts as passed) |
+| `checkpoint` | string | no | Save state after pass, restore if skipped |
+
+### Include steps
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `include_path` | string | yes* | Relative path to a test file to inline |
+| `include_glob` | string | yes* | Glob pattern to inline multiple files |
+
+Include steps are expanded into the flat step list before execution. Glob matches are sorted alphabetically.
+
+## File naming conventions
+
+| Pattern | Behavior |
+|---------|----------|
+| `*.test.toml` | Discovered by `bugatti test` |
+| `_*.test.toml` | Excluded from discovery (include-only) |

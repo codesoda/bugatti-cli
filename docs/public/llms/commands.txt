@@ -1,0 +1,56 @@
+# bugatti — Commands
+
+Commands manage project infrastructure: install deps, start servers, wait for readiness, tear down after tests.
+
+## Short-Lived Commands
+
+Run to completion before tests. Fail the run (exit code 6) on non-zero exit.
+
+  [commands.install]
+  kind = "short_lived"
+  cmd = "pnpm install"
+
+  [commands.migrate]
+  kind = "short_lived"
+  cmd = "npm run db:migrate"
+
+## Long-Lived Commands
+
+Spawn in background, stay running during tests, torn down after.
+
+  [commands.server]
+  kind = "long_lived"
+  cmd = "npm start"
+  readiness_url = "http://localhost:3000/health"
+
+Bugatti polls the readiness URL with HTTP GET until it responds (or times out — exit code 3).
+
+Multiple readiness URLs:
+
+  [commands.docker-stack]
+  kind = "long_lived"
+  cmd = "docker compose up"
+  readiness_urls = ["http://localhost:3000/health", "http://localhost:5432"]
+  readiness_timeout_secs = 120
+
+## Long-Lived Options
+
+  readiness_url           string   —   Single URL to poll
+  readiness_urls          string[] []  Multiple URLs (all must respond)
+  readiness_timeout_secs  integer  30  How long to wait
+
+## Skipping Commands (CLI)
+
+  bugatti test --skip-cmd install              # don't run install
+  bugatti test --skip-cmd install --skip-cmd migrate  # skip multiple
+  bugatti test --skip-cmd server --skip-readiness server  # skip cmd + readiness
+
+Readiness checks still run by default for skipped commands. Use --skip-readiness to skip those too.
+
+## Execution Order
+
+1. Short-lived commands run first (in declaration order)
+2. Long-lived commands are spawned
+3. Readiness checks poll until all ready
+4. Tests execute
+5. Long-lived commands torn down

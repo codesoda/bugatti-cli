@@ -1,0 +1,27 @@
+# bugatti — Test Discovery
+
+Run `bugatti test` with no path to discover and run all tests.
+
+## Rules
+
+- Recursively finds all *.test.toml files from the current directory
+- Skips _-prefixed files (include-only building blocks)
+- Skips hidden directories (.git, .bugatti, etc.)
+
+## Example
+
+  project/
+    _setup.test.toml          # skipped
+    login.test.toml            # discovered
+    checkout.test.toml         # discovered
+    features/
+      _auth-helpers.test.toml  # skipped
+      signup.test.toml          # discovered
+
+  bugatti test  →  runs login, checkout, features/signup
+
+## Running a Specific Test
+
+  bugatti test login.test.toml
+
+Bypasses discovery — can even run _-prefixed files directly.

@@ -1,0 +1,49 @@
+---
+title: Skipping Steps
+description: Skip steps for faster iteration during development.
+---
+
+Add `skip = true` to any step to bypass it during execution. Skipped steps count as passed, take zero time, and don't send anything to the agent.
+
+## Basic usage
+
+```toml
+[[steps]]
+instruction = "Create account and complete onboarding"
+skip = true
+
+[[steps]]
+instruction = "Configure billing with test card"
+skip = true
+
+[[steps]]
+instruction = "Invite team member and verify email"
+```
+
+Console output:
+
+```
+SKIP 1/3 ... Create account and complete onboarding (from ftue.test.toml)
+SKIP 2/3 ... Configure billing with test card (from ftue.test.toml)
+STEP 3/3 ... Invite team member and verify email (from ftue.test.toml)
+```
+
+## When to use skip
+
+- **Iterative development** — Steps 1-4 pass. You're working on step 5. Mark 1-4 as `skip = true` so each run goes straight to step 5.
+- **Focusing on a failing step** — A step deep in the suite fails. Skip everything before it to iterate faster.
+- **Pairing with checkpoints** — Skip steps that set up state, and use [checkpoints](/guides/checkpoints/) to restore that state instead.
+
+## Disabling a skip
+
+Remove the line or comment it out:
+
+```toml
+[[steps]]
+instruction = "Create account and complete onboarding"
+#skip = true
+```
+
+## Important caveat
+
+Skipping a step does not undo its effects. If steps 1-3 set up database state and you skip them, that state won't exist unless you either run them first or restore it via a [checkpoint](/guides/checkpoints/).

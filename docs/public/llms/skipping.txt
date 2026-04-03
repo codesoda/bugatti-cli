@@ -1,0 +1,38 @@
+# bugatti — Skipping Steps
+
+Add skip = true to bypass a step. Skipped steps count as passed, take zero time, send nothing to the agent.
+
+## Usage
+
+  [[steps]]
+  instruction = "Create account and complete onboarding"
+  skip = true
+
+  [[steps]]
+  instruction = "Configure billing with test card"
+  skip = true
+
+  [[steps]]
+  instruction = "Invite team member and verify email"
+
+Output:
+  SKIP 1/3 ... Create account and complete onboarding
+  SKIP 2/3 ... Configure billing with test card
+  STEP 3/3 ... Invite team member and verify email
+
+## When to Use
+
+- Iterative development: steps 1-4 pass, skip them to work on step 5
+- Focusing on a failing step: skip everything before it
+- Pairing with checkpoints: skip + restore state
+
+## Disabling
+
+Remove the line or comment it out:
+  #skip = true
+
+## Important
+
+Skipping does NOT undo a step's effects. If skipped steps set up state (database, files), that state won't exist unless restored via a checkpoint.
+
+See https://bugatti.dev/llms/checkpoints.txt for checkpoints.

@@ -1,0 +1,60 @@
+# bugatti — Getting Started
+
+## Install
+
+Pre-built binary (macOS arm64):
+  curl -sSf https://raw.githubusercontent.com/codesoda/bugatti-cli/main/install.sh | sh
+
+From source (requires Rust):
+  git clone https://github.com/codesoda/bugatti-cli.git
+  cd bugatti-cli
+  sh install.sh
+
+Binary goes to ~/.bugatti/bin/bugatti with a symlink at ~/.local/bin/bugatti.
+To update: re-run the install command.
+
+## First Test
+
+1. Create smoke.test.toml:
+
+  name = "Smoke test"
+
+  [[steps]]
+  instruction = "Create a file called hello.txt with the contents 'Hello, world!'"
+
+  [[steps]]
+  instruction = "Read hello.txt and verify it contains 'Hello, world!'"
+
+  [[steps]]
+  instruction = "Delete hello.txt and verify it no longer exists"
+
+2. Run it:
+
+  bugatti test smoke.test.toml
+
+3. Output:
+
+  STEP 1/3 ... Create a file called hello.txt with the contents 'Hello, world!'
+    OK 1/3 (4.2s)
+  STEP 2/3 ... Read hello.txt and verify it contains 'Hello, world!'
+    OK 2/3 (3.1s)
+  STEP 3/3 ... Delete hello.txt and verify it no longer exists
+    OK 3/3 (2.8s)
+  DONE 3 passed, 0 warned, 0 failed (10.1s)
+
+## Discover All Tests
+
+  bugatti test
+
+Finds all *.test.toml files recursively, skipping _-prefixed files.
+
+## Add a Config (Optional)
+
+Create bugatti.config.toml for commands and provider settings:
+
+  [commands.server]
+  kind = "long_lived"
+  cmd = "npm start"
+  readiness_url = "http://localhost:3000/health"
+
+See https://bugatti.dev/llms/configuration.txt for full config reference.

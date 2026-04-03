@@ -1,0 +1,65 @@
+---
+title: CLI Reference
+description: Complete reference for the bugatti command-line interface.
+---
+
+## bugatti
+
+```
+bugatti <COMMAND>
+```
+
+| Command | Description |
+|---------|-------------|
+| `test` | Run tests from a `.test.toml` file or discover all root test files |
+| `help` | Print help or the help of a subcommand |
+
+| Option | Description |
+|--------|-------------|
+| `-h, --help` | Print help |
+| `-V, --version` | Print version |
+
+## bugatti test
+
+```
+bugatti test [OPTIONS] [PATH]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `[PATH]` | Path to a specific `.test.toml` file. If omitted, discovers and runs all root test files. |
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--skip-cmd <name>` | Skip launching a configured command (can be repeated). The command won't be started, tracked, or torn down. Readiness checks still run by default. |
+| `--skip-readiness <name>` | Skip readiness checks for the named command (can be repeated). Only meaningful with `--skip-cmd`. |
+| `--strict-warnings` | Treat WARN verdicts as failures (exit code 1 instead of 0). Overrides config. |
+| `--from-checkpoint <name>` | Resume from a named checkpoint. Auto-skips all steps up to and including the checkpoint step, restores state, then runs the rest. |
+| `-v, --verbose` | Enable verbose output: show full prompts, provider command lines, and timing details. |
+| `-h, --help` | Print help. |
+
+### Examples
+
+```sh
+# Run a specific test file
+bugatti test login.test.toml
+
+# Discover and run all tests
+bugatti test
+
+# Skip the install command (it already ran)
+bugatti test --skip-cmd install
+
+# Resume from a checkpoint
+bugatti test ftue.test.toml --from-checkpoint after-billing
+
+# Treat warnings as failures
+bugatti test --strict-warnings
+
+# Verbose output
+bugatti test -v login.test.toml
+```

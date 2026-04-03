@@ -1,0 +1,47 @@
+# bugatti — CLI Reference
+
+## bugatti
+
+  bugatti <COMMAND>
+
+Commands:
+  test    Run tests from a .test.toml file or discover all root test files
+  help    Print help or subcommand help
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+## bugatti test
+
+  bugatti test [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]  Path to a .test.toml file. If omitted, discovers all root test files.
+
+Options:
+  --skip-cmd <name>           Skip launching a configured command (repeatable)
+  --skip-readiness <name>     Skip readiness checks for a command (repeatable)
+  --strict-warnings           Treat WARN verdicts as failures (exit code 1)
+  --from-checkpoint <name>    Resume from a named checkpoint (auto-skip earlier steps)
+  -v, --verbose               Show full prompts, command lines, timing details
+  -h, --help                  Print help
+
+## Examples
+
+  bugatti test login.test.toml                         # run specific test
+  bugatti test                                          # discover all tests
+  bugatti test --skip-cmd install                       # skip a command
+  bugatti test ftue.test.toml --from-checkpoint after-billing  # resume
+  bugatti test --strict-warnings                        # WARN = failure
+  bugatti test -v login.test.toml                       # verbose output
+
+## Exit Codes
+
+  0  All steps passed (OK or WARN)
+  1  One or more steps had ERROR results
+  2  Configuration, parse, or cycle error
+  3  Provider startup or readiness failure
+  4  Step execution timeout
+  5  Run interrupted (Ctrl+C)
+  6  Setup command failed

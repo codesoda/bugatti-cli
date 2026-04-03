@@ -1,0 +1,53 @@
+# bugatti — Configuration
+
+Config file: bugatti.config.toml (in project root, optional).
+
+## Full Example
+
+  [provider]
+  name = "claude-code"
+  extra_system_prompt = "Use the browser for UI tests."
+  agent_args = ["--dangerously-skip-permissions"]
+  step_timeout_secs = 300
+  strict_warnings = true
+  base_url = "http://localhost:3000"
+
+  [commands.migrate]
+  kind = "short_lived"
+  cmd = "npm run db:migrate"
+
+  [commands.server]
+  kind = "long_lived"
+  cmd = "npm start"
+  readiness_url = "http://localhost:3000/health"
+
+  [checkpoint]
+  save = "./scripts/checkpoint.sh save"
+  restore = "./scripts/checkpoint.sh restore"
+  timeout_secs = 180
+
+## [provider] Fields
+
+  name               string   "claude-code"  Provider to use
+  extra_system_prompt string   —              Additional context for the agent
+  agent_args         string[] []             Extra CLI args for the provider
+  step_timeout_secs  integer  300            Default timeout per step (seconds)
+  strict_warnings    boolean  false          Treat WARN as failures
+  base_url           string   —              Base URL for the app under test
+
+## [commands.<name>] Fields
+
+  kind                    string   required  "short_lived" or "long_lived"
+  cmd                     string   required  Shell command to execute
+  readiness_url           string   —         Single URL to poll (long_lived only)
+  readiness_urls          string[] —         Multiple URLs to poll (long_lived only)
+  readiness_timeout_secs  integer  30        How long to wait for readiness
+
+## [checkpoint] Fields
+
+  save         string   required  Shell command to save a checkpoint
+  restore      string   required  Shell command to restore a checkpoint
+  timeout_secs integer  120       Timeout for save/restore commands
+
+See https://bugatti.dev/llms/commands.txt for command details.
+See https://bugatti.dev/llms/checkpoints.txt for checkpoint details.

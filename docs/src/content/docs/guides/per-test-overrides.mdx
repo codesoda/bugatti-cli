@@ -1,0 +1,56 @@
+---
+title: Per-Test Overrides
+description: Override provider settings for individual test files.
+---
+
+Override provider settings in a specific test file using the `[overrides.provider]` section. This lets different tests use different timeouts, system prompts, or base URLs without changing the global config.
+
+## Usage
+
+```toml
+name = "Long-running integration test"
+
+[overrides.provider]
+extra_system_prompt = "Be concise. Skip screenshots."
+step_timeout_secs = 600
+base_url = "http://localhost:5000"
+
+[[steps]]
+instruction = "Run the full data import and verify row counts"
+```
+
+## What can be overridden
+
+| Field | Description |
+|-------|-------------|
+| `extra_system_prompt` | Additional context for the agent (replaces global value) |
+| `step_timeout_secs` | Default timeout per step for this test |
+| `base_url` | Base URL for this test |
+
+The override completely replaces the global value for that field — it doesn't merge or append.
+
+## Example: different base URLs
+
+A project with multiple services on different ports:
+
+```toml
+# api.test.toml
+name = "API tests"
+
+[overrides.provider]
+base_url = "http://localhost:3000"
+
+[[steps]]
+instruction = "GET /api/health and verify status is ok"
+```
+
+```toml
+# admin.test.toml
+name = "Admin API tests"
+
+[overrides.provider]
+base_url = "http://localhost:3001"
+
+[[steps]]
+instruction = "GET /admin/stats and verify uptime is present"
+```

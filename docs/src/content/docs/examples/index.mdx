@@ -1,0 +1,23 @@
+---
+title: Examples
+description: Working example projects you can clone and run.
+---
+
+All examples are in the [`examples/`](https://github.com/codesoda/bugatti-cli/tree/main/examples) directory of the bugatti repo.
+
+| Example | What it tests | Key features |
+|---------|--------------|--------------|
+| [Static HTML](/examples/static-html/) | Local HTML page via browser | No server, browser testing |
+| [Node + Express](/examples/node-express/) | Express TypeScript API + UI | pnpm install, shared setup via `_` prefix, multi-port |
+| [Python + Flask](/examples/python-flask/) | Flask API + UI | Long-lived server, readiness URL, strict warnings |
+| [Rust CLI](/examples/rust-cli/) | Rust CLI tool | Short-lived build command, per-step timeout |
+
+## Running an example
+
+```sh
+git clone https://github.com/codesoda/bugatti-cli.git
+cd bugatti-cli/examples/static-html
+bugatti test
+```
+
+Each example includes a `bugatti.config.toml` and one or more `.test.toml` files ready to run.

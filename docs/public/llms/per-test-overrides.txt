@@ -1,0 +1,23 @@
+# bugatti — Per-Test Overrides
+
+Override provider settings in a specific test file.
+
+## Usage
+
+  name = "Long-running integration test"
+
+  [overrides.provider]
+  extra_system_prompt = "Be concise. Skip screenshots."
+  step_timeout_secs = 600
+  base_url = "http://localhost:5000"
+
+  [[steps]]
+  instruction = "Run the full data import and verify row counts"
+
+## Overridable Fields
+
+  extra_system_prompt  — replaces global value
+  step_timeout_secs    — replaces global timeout
+  base_url             — replaces global base URL
+
+The override completely replaces the global value (no merging).
