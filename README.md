@@ -44,7 +44,18 @@ sh install.sh
 
 Builds from source with `cargo build --release`.
 
-## Quick Start
+## Quick Start with a Coding Agent
+
+Already using Claude Code, Cursor, Windsurf, or another AI coding agent? Just paste this prompt:
+
+```
+I want to add automated testing to this project using bugatti (https://bugatti.dev/llms.txt).
+Help me get it installed and configured, then interview me about what tests I want to create first.
+```
+
+The agent will read the docs, install bugatti, set up your config, and walk you through writing your first tests.
+
+## Quick Start (Manual)
 
 Create a test file:
 
