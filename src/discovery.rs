@@ -59,11 +59,13 @@ pub struct DiscoveryResult {
 /// meant to be included by other test files, not run directly.
 /// Discovery order is deterministic (sorted by path).
 /// Parse errors are collected per-file rather than aborting discovery.
-pub fn discover_root_tests(root: &Path) -> Result<DiscoveryResult, DiscoveryError> {
+pub fn discover_root_tests(root: &Path) -> Result<DiscoveryResult, Box<DiscoveryError>> {
     let mut test_files = Vec::new();
-    collect_test_files(root, &mut test_files).map_err(|e| DiscoveryError::ReadDir {
-        path: root.display().to_string(),
-        source: e,
+    collect_test_files(root, &mut test_files).map_err(|e| {
+        Box::new(DiscoveryError::ReadDir {
+            path: root.display().to_string(),
+            source: e,
+        })
     })?;
 
     // Sort for deterministic order

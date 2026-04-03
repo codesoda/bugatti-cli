@@ -85,7 +85,7 @@ impl CommandDef {
     pub fn effective_readiness_urls(&self) -> Vec<&str> {
         let mut urls: Vec<&str> = self.readiness_urls.iter().map(|s| s.as_str()).collect();
         if let Some(ref url) = self.readiness_url {
-            if !urls.iter().any(|u| *u == url.as_str()) {
+            if !urls.contains(&url.as_str()) {
                 urls.insert(0, url.as_str());
             }
         }
