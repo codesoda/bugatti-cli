@@ -3,7 +3,7 @@ name: Deploy Docs to Cloudflare Pages
 on:
   push:
     branches: [main]
-    paths: ['docs/**']
+    paths: ['docs/**', '.github/workflows/docs.yml']
 
 jobs:
   deploy:
