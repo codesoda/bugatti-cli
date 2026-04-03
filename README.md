@@ -560,6 +560,10 @@ Working examples in [`examples/`](examples/):
 | `5` | Run interrupted (Ctrl+C) |
 | `6` | Setup command failed |
 
+## Docs
+
+Full documentation at [bugatti.dev](https://bugatti.dev). LLM-friendly reference at [bugatti.dev/llms.txt](https://bugatti.dev/llms.txt).
+
 ## License
 
 MIT

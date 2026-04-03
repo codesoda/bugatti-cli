@@ -16,7 +16,8 @@ Exit codes:
   5  Run was interrupted (Ctrl+C)
   6  Setup command failed
 
-Docs: https://bugatti.dev/llms.txt
+Docs:    https://bugatti.dev
+LLM ref: https://bugatti.dev/llms.txt
 "
 )]
 pub struct Cli {
