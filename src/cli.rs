@@ -18,6 +18,11 @@ Exit codes:
 
 Docs:    https://bugatti.dev
 LLM ref: https://bugatti.dev/llms.txt
+
+Get started with an AI coding agent:
+  Ask your agent to set up bugatti tests for this project using the
+  docs at https://bugatti.dev/llms.txt — it will install bugatti,
+  configure your project, and help you write your first tests.
 "
 )]
 pub struct Cli {
