@@ -32,6 +32,17 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Check for and install updates
+    Update {
+        /// Only check if a newer version is available; do not download or install
+        #[arg(long)]
+        check: bool,
+
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+    },
+
     /// Run tests from a *.test.toml file or discover all root test files
     #[command(after_help = "Docs: https://bugatti.dev/llms/cli-reference.txt")]
     Test {

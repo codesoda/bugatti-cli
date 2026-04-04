@@ -171,9 +171,9 @@ install_from_release() {
 
     header "Fetching latest release"
 
-    # Get the latest release tag
-    latest_url="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest"
-    tag="$(curl -sSf "$latest_url" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+    # Get the latest release tag via redirect (avoids GitHub API rate limits)
+    latest_url="https://github.com/$REPO_OWNER/$REPO_NAME/releases/latest"
+    tag="$(curl -sSf -o /dev/null -w '%{redirect_url}' "$latest_url" | grep -oE '[^/]+$')"
     if [ -z "$tag" ]; then
         die "Could not determine latest release — check https://github.com/$REPO_OWNER/$REPO_NAME/releases"
     fi
@@ -240,9 +240,29 @@ install_binary() {
 
     cp "$src_binary" "$target_path"
     chmod +x "$target_path"
+
+    # macOS: remove quarantine and apply ad-hoc code signature
+    secure_binary "$target_path"
+
     ok_detail "Installed" "$target_path"
 
     INSTALLED_BINARY="$target_path"
+}
+
+# --- macOS binary security ---
+
+secure_binary() {
+    case "$(uname -s)" in
+        Darwin)
+            if command -v xattr >/dev/null 2>&1; then
+                xattr -dr com.apple.quarantine "$1" 2>/dev/null || true
+                xattr -dr com.apple.provenance "$1" 2>/dev/null || true
+            fi
+            if command -v codesign >/dev/null 2>&1; then
+                codesign --force --sign - "$1" 2>/dev/null || true
+            fi
+            ;;
+    esac
 }
 
 # --- Symlink to ~/.local/bin ---

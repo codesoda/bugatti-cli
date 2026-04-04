@@ -11,3 +11,4 @@ pub mod provider;
 pub mod report;
 pub mod run;
 pub mod test_file;
+pub mod update;
