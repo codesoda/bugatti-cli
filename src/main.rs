@@ -78,7 +78,16 @@ fn main() {
     );
     println!();
 
+    let is_update_command = matches!(&cli.command, Commands::Update { .. });
+
     let code = match cli.command {
+        Commands::Update { check, yes } => match bugatti::update::run_update(check, yes) {
+            Ok(()) => EXIT_OK,
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                EXIT_CONFIG_ERROR
+            }
+        },
         Commands::Test {
             path,
             skip_cmds,
@@ -137,6 +146,11 @@ fn main() {
             }
         }
     };
+
+    // Passive background version check after successful runs
+    if code == EXIT_OK && !is_update_command {
+        bugatti::update::spawn_passive_check();
+    }
 
     std::process::exit(code);
 }
@@ -784,6 +798,7 @@ mod tests {
                 assert!(path.is_none());
                 assert!(skip_cmds.is_empty());
             }
+            _ => panic!("expected Test command"),
         }
     }
 
@@ -797,6 +812,7 @@ mod tests {
                 assert_eq!(path.unwrap(), "some/path.test.toml");
                 assert!(skip_cmds.is_empty());
             }
+            _ => panic!("expected Test command"),
         }
     }
 
@@ -810,6 +826,7 @@ mod tests {
                 assert!(path.is_none());
                 assert_eq!(skip_cmds, vec!["migrate".to_string()]);
             }
+            _ => panic!("expected Test command"),
         }
     }
 
@@ -831,6 +848,7 @@ mod tests {
                 assert_eq!(path.unwrap(), "my.test.toml");
                 assert_eq!(skip_cmds, vec!["migrate".to_string(), "server".to_string()]);
             }
+            _ => panic!("expected Test command"),
         }
     }
 
@@ -853,6 +871,7 @@ mod tests {
                 assert_eq!(skip_cmds, vec!["server".to_string()]);
                 assert_eq!(skip_readiness, vec!["server".to_string()]);
             }
+            _ => panic!("expected Test command"),
         }
     }
 
@@ -865,6 +884,43 @@ mod tests {
             } => {
                 assert!(strict_warnings);
             }
+            _ => panic!("expected Test command"),
+        }
+    }
+
+    #[test]
+    fn test_update_subcommand_defaults() {
+        let cli = Cli::parse_from(["bugatti", "update"]);
+        match cli.command {
+            bugatti::cli::Commands::Update { check, yes } => {
+                assert!(!check);
+                assert!(!yes);
+            }
+            _ => panic!("expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_subcommand_check() {
+        let cli = Cli::parse_from(["bugatti", "update", "--check"]);
+        match cli.command {
+            bugatti::cli::Commands::Update { check, yes } => {
+                assert!(check);
+                assert!(!yes);
+            }
+            _ => panic!("expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_subcommand_yes() {
+        let cli = Cli::parse_from(["bugatti", "update", "-y"]);
+        match cli.command {
+            bugatti::cli::Commands::Update { check, yes } => {
+                assert!(!check);
+                assert!(yes);
+            }
+            _ => panic!("expected Update command"),
         }
     }
 
