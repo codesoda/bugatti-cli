@@ -15,6 +15,7 @@ use bugatti::exit_code::{
     EXIT_STEP_ERROR,
 };
 use bugatti::expand;
+use bugatti::output;
 use bugatti::provider::AgentSession;
 use bugatti::report::{self, ReportInput};
 use bugatti::run::{self, ArtifactDir, EffectiveConfigSummary};
@@ -72,10 +73,10 @@ fn main() {
 
     let cli = Cli::parse();
 
-    println!(
-        "\x1b[1mbugatti\x1b[0m \x1b[38;5;243mv{}\x1b[0m",
-        env!("CARGO_PKG_VERSION")
-    );
+    let bold = output::ansi("\x1b[1m");
+    let dim = output::ansi("\x1b[38;5;243m");
+    let reset = output::ansi("\x1b[0m");
+    println!("{bold}bugatti{reset} {dim}v{}{reset}", env!("CARGO_PKG_VERSION"));
     println!();
 
     let is_update_command = matches!(&cli.command, Commands::Update { .. });
@@ -384,9 +385,9 @@ fn run_test_with_artifacts(
     );
 
     // Print per-test run info
-    let dim = "\x1b[38;5;243m";
-    let light = "\x1b[38;5;250m";
-    let reset = "\x1b[0m";
+    let dim = output::ansi("\x1b[38;5;243m");
+    let light = output::ansi("\x1b[38;5;250m");
+    let reset = output::ansi("\x1b[0m");
     if ctx.effective.provider.agent_args.is_empty() {
         println!("  {dim}Provider:{reset}  {}", ctx.effective.provider.name);
     } else {

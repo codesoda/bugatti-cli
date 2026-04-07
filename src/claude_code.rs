@@ -25,6 +25,10 @@ mod color {
     pub const SEP: &str = "\x1b[38;5;238m";
     // Reset
     pub const RESET: &str = "\x1b[0m";
+
+    pub fn ansi(code: &'static str) -> &'static str {
+        crate::output::ansi(code)
+    }
 }
 
 /// Claude Code CLI provider adapter.
@@ -173,19 +177,19 @@ impl ClaudeCodeAdapter {
                 .collect();
             eprintln!(
                 "{}[verbose]{} {}launch:{} {} {}{}",
-                color::DIM,
-                color::RESET,
-                color::DIM,
-                color::RESET,
-                color::CMD,
+                color::ansi(color::DIM),
+                color::ansi(color::RESET),
+                color::ansi(color::DIM),
+                color::ansi(color::RESET),
+                color::ansi(color::CMD),
                 args.join(" "),
-                color::RESET
+                color::ansi(color::RESET)
             );
             eprintln!(
                 "{}         binary: {}{}",
-                color::DIM,
+                color::ansi(color::DIM),
                 cmd.get_program().to_string_lossy(),
-                color::RESET
+                color::ansi(color::RESET)
             );
         }
 
@@ -228,14 +232,19 @@ impl ClaudeCodeAdapter {
         if self.verbose {
             eprintln!(
                 "{}[verbose]{} {}prompt ({} bytes):{}",
-                color::DIM,
-                color::RESET,
-                color::DIM,
+                color::ansi(color::DIM),
+                color::ansi(color::RESET),
+                color::ansi(color::DIM),
                 message.len(),
-                color::RESET
+                color::ansi(color::RESET)
             );
-            eprintln!("{}{}{}", color::PROMPT, message, color::RESET);
-            eprintln!("{}───{}", color::SEP, color::RESET);
+            eprintln!(
+                "{}{}{}",
+                color::ansi(color::PROMPT),
+                message,
+                color::ansi(color::RESET)
+            );
+            eprintln!("{}───{}", color::ansi(color::SEP), color::ansi(color::RESET));
         }
 
         stdin
@@ -427,7 +436,7 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                         .chars()
                                                         .take(12)
                                                         .collect::<String>();
-                                                    eprintln!("{}[verbose]{} {}tool:{} {}{}{} {}{}{} {}({}){}", color::DIM, color::RESET, color::DIM, color::RESET, color::TOOL, name, color::RESET, color::LIGHT, input_preview, color::RESET, color::DIM, id_short, color::RESET);
+                                                    eprintln!("{}[verbose]{} {}tool:{} {}{}{} {}{}{} {}({}){}", color::ansi(color::DIM), color::ansi(color::RESET), color::ansi(color::DIM), color::ansi(color::RESET), color::ansi(color::TOOL), name, color::ansi(color::RESET), color::ansi(color::LIGHT), input_preview, color::ansi(color::RESET), color::ansi(color::DIM), id_short, color::ansi(color::RESET));
                                                 }
                                             }
                                             "thinking" => {
@@ -435,16 +444,16 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                     if let Some(thinking) = &block.thinking {
                                                         eprintln!(
                                                             "{}[verbose]{} {}thinking:{}",
-                                                            color::DIM,
-                                                            color::RESET,
-                                                            color::DIM,
-                                                            color::RESET
+                                                            color::ansi(color::DIM),
+                                                            color::ansi(color::RESET),
+                                                            color::ansi(color::DIM),
+                                                            color::ansi(color::RESET)
                                                         );
                                                         eprintln!(
                                                             "{}{}{}",
-                                                            color::THINKING,
+                                                            color::ansi(color::THINKING),
                                                             thinking,
-                                                            color::RESET
+                                                            color::ansi(color::RESET)
                                                         );
                                                     }
                                                 }
@@ -479,19 +488,19 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                     .collect::<String>();
                                                 eprintln!(
                                                     "{}[verbose]{} {}result:{} {}({}){}",
-                                                    color::DIM,
-                                                    color::RESET,
-                                                    color::DIM,
-                                                    color::RESET,
-                                                    color::DIM,
+                                                    color::ansi(color::DIM),
+                                                    color::ansi(color::RESET),
+                                                    color::ansi(color::DIM),
+                                                    color::ansi(color::RESET),
+                                                    color::ansi(color::DIM),
                                                     id_short,
-                                                    color::RESET
+                                                    color::ansi(color::RESET)
                                                 );
                                                 eprintln!(
                                                     "{}{}{}",
-                                                    color::RESULT,
+                                                    color::ansi(color::RESULT),
                                                     result_text,
-                                                    color::RESET
+                                                    color::ansi(color::RESET)
                                                 );
                                             }
                                         }
