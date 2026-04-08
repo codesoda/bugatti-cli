@@ -2,17 +2,25 @@ use serde::Deserialize;
 use std::path::Path;
 
 /// A parsed test file loaded from a *.test.toml file.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TestFile {
-    /// Name of the test.
+    /// Name of the test. Defaults to the file stem if omitted.
     pub name: String,
     /// Optional per-test overrides.
-    #[serde(default)]
     pub overrides: Option<TestOverrides>,
     /// Ordered list of steps to execute.
-    #[serde(default)]
     pub steps: Vec<Step>,
+}
+
+/// Raw deserialization target where `name` is optional.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTestFile {
+    name: Option<String>,
+    #[serde(default)]
+    overrides: Option<TestOverrides>,
+    #[serde(default)]
+    steps: Vec<Step>,
 }
 
 /// Per-test overrides that merge over the global config.
@@ -49,6 +57,10 @@ pub struct Step {
     /// If true, this step is skipped during execution (counts as passed).
     #[serde(default)]
     pub skip: bool,
+    /// If true, this is a setup step that always runs (even when checkpoint-skipped).
+    /// Setup steps are not evaluated as pass/fail — they either complete or abort the run.
+    #[serde(default)]
+    pub setup: bool,
     /// Optional checkpoint name — saved after this step passes, restored if this step is skipped.
     #[serde(default)]
     pub checkpoint: Option<String>,
@@ -104,10 +116,28 @@ pub fn parse_test_file(path: &Path) -> Result<TestFile, TestFileError> {
         path: path_str.clone(),
         source: e,
     })?;
-    let test_file: TestFile = toml::from_str(&contents).map_err(|e| TestFileError::ParseError {
+    let raw: RawTestFile = toml::from_str(&contents).map_err(|e| TestFileError::ParseError {
         path: path_str.clone(),
         source: e,
     })?;
+
+    let default_name = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("unknown")
+        .strip_suffix(".test.toml")
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+        })
+        .to_string();
+
+    let test_file = TestFile {
+        name: raw.name.unwrap_or(default_name),
+        overrides: raw.overrides,
+        steps: raw.steps,
+    };
 
     // Validate each step has exactly one of: instruction, include_path, include_glob
     for (i, step) in test_file.steps.iter().enumerate() {
@@ -334,6 +364,23 @@ step_timeout_secs = 900
         assert_eq!(test_file.steps.len(), 2);
         assert!(test_file.steps[0].step_timeout_secs.is_none());
         assert_eq!(test_file.steps[1].step_timeout_secs, Some(900));
+    }
+
+    #[test]
+    fn name_defaults_to_file_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("login-flow.test.toml");
+        fs::write(
+            &path,
+            r#"
+[[steps]]
+instruction = "Do something"
+"#,
+        )
+        .unwrap();
+
+        let test_file = parse_test_file(&path).unwrap();
+        assert_eq!(test_file.name, "login-flow");
     }
 
     #[test]

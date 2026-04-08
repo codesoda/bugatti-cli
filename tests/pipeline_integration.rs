@@ -350,6 +350,7 @@ instruction = "This will fail"
             step_id: 0,
             instruction: "This will fail".to_string(),
             source_file: test_path.clone(),
+            setup: false,
             result: StepResult::Verdict(StepVerdict::Error("something broke".to_string())),
             transcript: "RESULT ERROR: something broke".to_string(),
             log_events: vec![],

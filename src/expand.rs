@@ -19,6 +19,8 @@ pub struct ExpandedStep {
     pub step_timeout_secs: Option<u64>,
     /// If true, this step is skipped during execution.
     pub skip: bool,
+    /// If true, this is a setup step that always runs (even when checkpoint-skipped).
+    pub setup: bool,
     /// Optional checkpoint name for save/restore.
     pub checkpoint: Option<String>,
 }
@@ -112,6 +114,7 @@ fn expand_steps_inner(
                 parent_chain: parent_chain.to_vec(),
                 step_timeout_secs: step.step_timeout_secs,
                 skip: step.skip,
+                setup: step.setup,
                 checkpoint: step.checkpoint.clone(),
             });
             *step_id += 1;

@@ -1,6 +1,6 @@
 [package]
 name = "bugatti"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "A CLI for plain-English, agent-assisted local application verification using *.test.toml files"
 
