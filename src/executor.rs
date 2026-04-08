@@ -70,6 +70,8 @@ pub struct StepOutcome {
     pub instruction: String,
     /// Source file for provenance.
     pub source_file: PathBuf,
+    /// Whether this was a setup step (not counted in test pass/fail).
+    pub setup: bool,
     /// The result: either a parsed verdict, a protocol error, or a timeout.
     pub result: StepResult,
     /// Full transcript text captured from the provider.
@@ -410,7 +412,7 @@ pub fn execute_steps(
     // Checkpoint restore: find the last checkpoint among leading skipped steps
     // and restore it before executing non-skipped steps.
     if let Some(cp_config) = checkpoint_config {
-        let first_non_skipped = steps.iter().position(|s| !s.skip);
+        let first_non_skipped = steps.iter().position(|s| !s.skip && !s.setup);
         if let Some(boundary) = first_non_skipped {
             if boundary > 0 {
                 // Find the last checkpoint among skipped steps before the boundary
@@ -466,8 +468,8 @@ pub fn execute_steps(
             })
             .unwrap_or_else(|| step.source_file.display().to_string());
 
-        // Handle skipped steps
-        if step.skip {
+        // Handle skipped steps (setup steps bypass skip)
+        if step.skip && !step.setup {
             println!(
                 "SKIP {}/{} ... {} (from {})",
                 step.step_id + 1,
@@ -479,6 +481,7 @@ pub fn execute_steps(
                 step_id: step.step_id,
                 instruction: step.instruction.clone(),
                 source_file: step.source_file.clone(),
+                setup: false,
                 result: StepResult::Verdict(StepVerdict::Ok),
                 transcript: String::new(),
                 log_events: vec![],
@@ -488,14 +491,16 @@ pub fn execute_steps(
             continue;
         }
 
+        let step_label = if step.setup { "SETUP" } else { "STEP" };
         tracing::info!(
             step_id = step.step_id,
             total = total_steps,
+            setup = step.setup,
             source = %step.source_file.display(),
             "step execution begin"
         );
         println!(
-            "STEP {}/{} ... {} (from {})",
+            "{step_label} {}/{} ... {} (from {})",
             step.step_id + 1,
             total_steps,
             instruction_summary,
@@ -525,7 +530,14 @@ pub fn execute_steps(
 
         let (step_result, transcript) = match result {
             Ok((transcript_text, verdict)) => (verdict, transcript_text),
-            Err((transcript_text, err_result)) => (err_result, transcript_text),
+            Err((transcript_text, err_result)) => {
+                // Setup steps tolerate missing RESULT markers — the agent just runs the command
+                if step.setup && matches!(err_result, StepResult::ProtocolError(_)) {
+                    (StepResult::Verdict(StepVerdict::Ok), transcript_text)
+                } else {
+                    (err_result, transcript_text)
+                }
+            }
         };
 
         // Parse BUGATTI_LOG events from the transcript
@@ -606,6 +618,7 @@ pub fn execute_steps(
             step_id: step.step_id,
             instruction: step.instruction.clone(),
             source_file: step.source_file.clone(),
+            setup: step.setup,
             result: step_result,
             transcript,
             log_events,
@@ -690,7 +703,13 @@ pub fn execute_steps(
         }
     }
 
-    let all_passed = outcomes.iter().all(|o| o.result.is_pass());
+    // Setup steps don't count toward pass/fail — only test steps determine the verdict.
+    // A failed setup step aborts the run (handled above), so if we reach here,
+    // all setup steps succeeded.
+    let all_passed = outcomes
+        .iter()
+        .filter(|o| !o.setup)
+        .all(|o| o.result.is_pass());
     let total_duration = run_start.elapsed();
 
     // Print final run status (after teardown)
@@ -759,23 +778,30 @@ fn print_run_summary(outcomes: &[StepOutcome], total_duration: Duration, total_s
     println!();
     println!("═══════════════════════════════════════════════════");
 
-    let completed = outcomes.len();
-    let ok_count = outcomes
+    let test_outcomes: Vec<_> = outcomes.iter().filter(|o| !o.setup).collect();
+    let setup_count = outcomes.iter().filter(|o| o.setup).count();
+    let completed = test_outcomes.len();
+    let ok_count = test_outcomes
         .iter()
         .filter(|o| matches!(o.result, StepResult::Verdict(StepVerdict::Ok)))
         .count();
-    let warn_count = outcomes
+    let warn_count = test_outcomes
         .iter()
         .filter(|o| matches!(o.result, StepResult::Verdict(StepVerdict::Warn(_))))
         .count();
-    let fail_count = outcomes.iter().filter(|o| o.result.is_failure()).count();
-    let skipped = total_steps - completed;
+    let fail_count = test_outcomes.iter().filter(|o| o.result.is_failure()).count();
+    let skipped = total_steps - completed - setup_count;
 
-    let all_passed = outcomes.iter().all(|o| o.result.is_pass());
+    let all_passed = test_outcomes.iter().all(|o| o.result.is_pass());
     let status = if all_passed { "PASSED" } else { "FAILED" };
 
+    let setup_part = if setup_count > 0 {
+        format!(", {setup_count} setup")
+    } else {
+        String::new()
+    };
     println!(
-        "Run {status}: {ok_count} ok, {warn_count} warn, {fail_count} failed, {skipped} skipped ({:.1}s)",
+        "Run {status}: {ok_count} ok, {warn_count} warn, {fail_count} failed, {skipped} skipped{setup_part} ({:.1}s)",
         total_duration.as_secs_f64()
     );
     println!("═══════════════════════════════════════════════════");
@@ -1011,6 +1037,7 @@ mod tests {
                 parent_chain: vec![],
                 step_timeout_secs: None,
                 skip: false,
+                setup: false,
                 checkpoint: None,
             },
             ExpandedStep {
@@ -1021,6 +1048,7 @@ mod tests {
                 parent_chain: vec![],
                 step_timeout_secs: None,
                 skip: false,
+                setup: false,
                 checkpoint: None,
             },
         ]
@@ -1914,5 +1942,271 @@ mod tests {
 
         // No steps should have executed
         assert_eq!(outcome.steps.len(), 0);
+    }
+
+    // --- Setup step tests ---
+
+    #[test]
+    fn setup_step_tolerates_missing_result_marker() {
+        let steps = vec![ExpandedStep {
+            step_id: 0,
+            instruction: "Start the browser in headed mode".to_string(),
+            source_file: PathBuf::from("/test/root.test.toml"),
+            source_step_index: 0,
+            parent_chain: vec![],
+            step_timeout_secs: None,
+            skip: false,
+            setup: true,
+            checkpoint: None,
+        }];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        // Agent responds without a RESULT marker — should be OK for setup steps
+        let mut session = MockSession::new(vec![vec![
+            Ok(OutputChunk::Text(
+                "Browser started in headed mode.".to_string(),
+            )),
+            Ok(OutputChunk::Done),
+        ]]);
+
+        let outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+            None,
+            None,
+            std::path::Path::new("."),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        assert!(outcome.all_passed);
+        assert_eq!(outcome.steps.len(), 1);
+        assert!(outcome.steps[0].setup);
+        assert_eq!(
+            outcome.steps[0].result,
+            StepResult::Verdict(StepVerdict::Ok)
+        );
+    }
+
+    #[test]
+    fn setup_step_bypasses_skip() {
+        let steps = vec![
+            ExpandedStep {
+                step_id: 0,
+                instruction: "Start the browser".to_string(),
+                source_file: PathBuf::from("/test/root.test.toml"),
+                source_step_index: 0,
+                parent_chain: vec![],
+                step_timeout_secs: None,
+                skip: true,
+                setup: true,
+                checkpoint: None,
+            },
+            ExpandedStep {
+                step_id: 1,
+                instruction: "Seed the database".to_string(),
+                source_file: PathBuf::from("/test/root.test.toml"),
+                source_step_index: 1,
+                parent_chain: vec![],
+                step_timeout_secs: None,
+                skip: true,
+                setup: false,
+                checkpoint: None,
+            },
+            ExpandedStep {
+                step_id: 2,
+                instruction: "Verify the homepage".to_string(),
+                source_file: PathBuf::from("/test/root.test.toml"),
+                source_step_index: 2,
+                parent_chain: vec![],
+                step_timeout_secs: None,
+                skip: false,
+                setup: false,
+                checkpoint: None,
+            },
+        ];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        // Only 2 steps should execute: the setup step (bypasses skip) and the non-skipped step
+        let mut session = MockSession::new(vec![
+            vec![
+                Ok(OutputChunk::Text("Browser started.\nRESULT OK".to_string())),
+                Ok(OutputChunk::Done),
+            ],
+            vec![
+                Ok(OutputChunk::Text("Homepage loaded.\nRESULT OK".to_string())),
+                Ok(OutputChunk::Done),
+            ],
+        ]);
+
+        let outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+            None,
+            None,
+            std::path::Path::new("."),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        assert!(outcome.all_passed);
+        // 3 outcomes: setup (executed), skipped (auto-ok), test (executed)
+        assert_eq!(outcome.steps.len(), 3);
+        // Step 0: setup ran
+        assert!(outcome.steps[0].setup);
+        assert_eq!(
+            outcome.steps[0].result,
+            StepResult::Verdict(StepVerdict::Ok)
+        );
+        // Step 1: skipped
+        assert!(!outcome.steps[1].setup);
+        assert_eq!(outcome.steps[1].duration, Duration::ZERO);
+        // Step 2: test ran
+        assert!(!outcome.steps[2].setup);
+        assert_eq!(
+            outcome.steps[2].result,
+            StepResult::Verdict(StepVerdict::Ok)
+        );
+    }
+
+    #[test]
+    fn setup_step_not_counted_in_all_passed() {
+        // A setup step + a failing test step: all_passed should be false
+        // because the test step failed, not because of the setup step.
+        let steps = vec![
+            ExpandedStep {
+                step_id: 0,
+                instruction: "Start the browser".to_string(),
+                source_file: PathBuf::from("/test/root.test.toml"),
+                source_step_index: 0,
+                parent_chain: vec![],
+                step_timeout_secs: None,
+                skip: false,
+                setup: true,
+                checkpoint: None,
+            },
+            ExpandedStep {
+                step_id: 1,
+                instruction: "Check the homepage".to_string(),
+                source_file: PathBuf::from("/test/root.test.toml"),
+                source_step_index: 1,
+                parent_chain: vec![],
+                step_timeout_secs: None,
+                skip: false,
+                setup: false,
+                checkpoint: None,
+            },
+        ];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        let mut session = MockSession::new(vec![
+            vec![
+                Ok(OutputChunk::Text("Browser started.".to_string())),
+                Ok(OutputChunk::Done),
+            ],
+            vec![
+                Ok(OutputChunk::Text(
+                    "RESULT ERROR: page not found".to_string(),
+                )),
+                Ok(OutputChunk::Done),
+            ],
+        ]);
+
+        let outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+            None,
+            None,
+            std::path::Path::new("."),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        assert!(!outcome.all_passed);
+        assert_eq!(outcome.steps.len(), 2);
+        // Setup step succeeded (no RESULT marker, tolerated)
+        assert!(outcome.steps[0].setup);
+        assert_eq!(
+            outcome.steps[0].result,
+            StepResult::Verdict(StepVerdict::Ok)
+        );
+        // Test step failed
+        assert!(!outcome.steps[1].setup);
+        assert!(outcome.steps[1].result.is_failure());
+    }
+
+    #[test]
+    fn setup_step_failure_aborts_run() {
+        let steps = vec![
+            ExpandedStep {
+                step_id: 0,
+                instruction: "Start the browser".to_string(),
+                source_file: PathBuf::from("/test/root.test.toml"),
+                source_step_index: 0,
+                parent_chain: vec![],
+                step_timeout_secs: None,
+                skip: false,
+                setup: true,
+                checkpoint: None,
+            },
+            ExpandedStep {
+                step_id: 1,
+                instruction: "Check the homepage".to_string(),
+                source_file: PathBuf::from("/test/root.test.toml"),
+                source_step_index: 1,
+                parent_chain: vec![],
+                step_timeout_secs: None,
+                skip: false,
+                setup: false,
+                checkpoint: None,
+            },
+        ];
+        let (run_id, session_id) = test_run_ids();
+        let (_tmp, artifact_dir) = test_artifact_dir();
+
+        // Setup step gets a provider error — should abort, second step never runs
+        let mut session = MockSession::new(vec![
+            vec![Err(ProviderError::SessionCrashed(
+                "process died".to_string(),
+            ))],
+            vec![
+                Ok(OutputChunk::Text("RESULT OK".to_string())),
+                Ok(OutputChunk::Done),
+            ],
+        ]);
+
+        let outcome = execute_steps(
+            &mut session,
+            &steps,
+            &run_id,
+            &session_id,
+            &artifact_dir,
+            None,
+            None,
+            None,
+            std::path::Path::new("."),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        // Only the setup step executed, and it failed
+        assert_eq!(outcome.steps.len(), 1);
+        assert!(outcome.steps[0].setup);
+        assert!(outcome.steps[0].result.is_failure());
     }
 }

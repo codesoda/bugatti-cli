@@ -185,13 +185,17 @@ pub fn report_path(artifact_dir: &ArtifactDir) -> std::path::PathBuf {
 }
 
 fn write_step_section(report: &mut String, outcome: &StepOutcome, artifact_dir: &ArtifactDir) {
-    let status_icon = match &outcome.result {
-        StepResult::Verdict(StepVerdict::Ok) => "OK",
-        StepResult::Verdict(StepVerdict::Warn(_)) => "WARN",
-        StepResult::Verdict(StepVerdict::Error(_)) => "ERROR",
-        StepResult::ProtocolError(_) => "PROTOCOL ERROR",
-        StepResult::Timeout => "TIMEOUT",
-        StepResult::ProviderFailed(_) => "PROVIDER ERROR",
+    let status_icon = if outcome.setup {
+        "SETUP"
+    } else {
+        match &outcome.result {
+            StepResult::Verdict(StepVerdict::Ok) => "OK",
+            StepResult::Verdict(StepVerdict::Warn(_)) => "WARN",
+            StepResult::Verdict(StepVerdict::Error(_)) => "ERROR",
+            StepResult::ProtocolError(_) => "PROTOCOL ERROR",
+            StepResult::Timeout => "TIMEOUT",
+            StepResult::ProviderFailed(_) => "PROVIDER ERROR",
+        }
     };
 
     let _ = writeln!(
@@ -337,6 +341,7 @@ mod tests {
             step_id,
             instruction: instruction.to_string(),
             source_file: PathBuf::from("tests/login.test.toml"),
+            setup: false,
             result: StepResult::Verdict(StepVerdict::Ok),
             transcript: format!("Checked.\nRESULT OK"),
             log_events: vec![],
@@ -350,6 +355,7 @@ mod tests {
             step_id,
             instruction: "Check response time".to_string(),
             source_file: PathBuf::from("tests/perf.test.toml"),
+            setup: false,
             result: StepResult::Verdict(StepVerdict::Warn(msg.to_string())),
             transcript: format!("Checked.\nBUGATTI_LOG slow response\nRESULT WARN: {msg}"),
             log_events: vec![LogEvent {
@@ -367,6 +373,7 @@ mod tests {
             step_id,
             instruction: "Verify login works".to_string(),
             source_file: PathBuf::from("tests/login.test.toml"),
+            setup: false,
             result: StepResult::Verdict(StepVerdict::Error(msg.to_string())),
             transcript: format!(
                 "Tried login.\nBUGATTI_LOG Auth failed\nBUGATTI_LOG Retried once\nRESULT ERROR: {msg}"
@@ -623,6 +630,7 @@ mod tests {
                 step_id: 0,
                 instruction: "Check something".to_string(),
                 source_file: PathBuf::from("test.test.toml"),
+                setup: false,
                 result: StepResult::ProtocolError("no RESULT marker".to_string()),
                 transcript: "Some output without marker".to_string(),
                 log_events: vec![],

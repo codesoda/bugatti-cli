@@ -134,6 +134,7 @@ mod tests {
                 step_id: i,
                 instruction: format!("step {i}"),
                 source_file: PathBuf::from("test.test.toml"),
+                setup: false,
                 result,
                 transcript: String::new(),
                 log_events: vec![],

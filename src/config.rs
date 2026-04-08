@@ -373,6 +373,7 @@ readiness_url = "http://localhost:3000/health"
                 include_glob: None,
                 step_timeout_secs: None,
                 skip: false,
+                setup: false,
                 checkpoint: None,
             }],
         };
