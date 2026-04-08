@@ -343,7 +343,7 @@ mod tests {
             source_file: PathBuf::from("tests/login.test.toml"),
             setup: false,
             result: StepResult::Verdict(StepVerdict::Ok),
-            transcript: format!("Checked.\nRESULT OK"),
+            transcript: "Checked.\nRESULT OK".to_string(),
             log_events: vec![],
             evidence_refs: vec![],
             duration: Duration::from_millis(1500),

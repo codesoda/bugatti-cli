@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn stream_turn_iterator_with_mock_process() {
         // Simulate stdout with assistant + result events
-        let child = Command::new("sh")
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(r#"echo '{"type":"system","subtype":"init"}'; echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"}]}}'; echo '{"type":"result","result":"Hello","subtype":"success"}';"#)
             .stdout(Stdio::piped())
@@ -643,7 +643,7 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let stdout = child.stdout.unwrap();
+        let stdout = child.stdout.take().unwrap();
         let mut reader = BufReader::new(stdout);
 
         // Skip system init
@@ -666,11 +666,12 @@ mod tests {
         }
 
         assert_eq!(collected, vec!["Hello"]);
+        let _ = child.wait();
     }
 
     #[test]
     fn stream_turn_iterator_reports_error_events() {
-        let child = Command::new("sh")
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(r#"echo '{"type":"error","error":"something went wrong"}'"#)
             .stdout(Stdio::piped())
@@ -678,7 +679,7 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let stdout = child.stdout.unwrap();
+        let stdout = child.stdout.take().unwrap();
         let mut reader = BufReader::new(stdout);
 
         let mut iter = StreamTurnIterator {
@@ -694,11 +695,12 @@ mod tests {
             matches!(item, Err(ProviderError::StreamError(ref msg)) if msg == "something went wrong"),
             "expected StreamError, got: {item:?}"
         );
+        let _ = child.wait();
     }
 
     #[test]
     fn stream_turn_iterator_skips_non_json_lines() {
-        let child = Command::new("sh")
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(r#"echo 'not json'; echo '{"type":"assistant","message":{"content":[{"type":"text","text":"text"}]}}'; echo '{"type":"result","result":"text","subtype":"success"}';"#)
             .stdout(Stdio::piped())
@@ -706,7 +708,7 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let stdout = child.stdout.unwrap();
+        let stdout = child.stdout.take().unwrap();
         let mut reader = BufReader::new(stdout);
 
         let mut iter = StreamTurnIterator {
@@ -725,6 +727,7 @@ mod tests {
         }
 
         assert_eq!(texts, vec!["text"]);
+        let _ = child.wait();
     }
 
     #[test]
