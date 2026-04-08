@@ -789,7 +789,10 @@ fn print_run_summary(outcomes: &[StepOutcome], total_duration: Duration, total_s
         .iter()
         .filter(|o| matches!(o.result, StepResult::Verdict(StepVerdict::Warn(_))))
         .count();
-    let fail_count = test_outcomes.iter().filter(|o| o.result.is_failure()).count();
+    let fail_count = test_outcomes
+        .iter()
+        .filter(|o| o.result.is_failure())
+        .count();
     let skipped = total_steps - completed - setup_count;
 
     let all_passed = test_outcomes.iter().all(|o| o.result.is_pass());
