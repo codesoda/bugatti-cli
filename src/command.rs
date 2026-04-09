@@ -126,7 +126,7 @@ pub fn validate_skip_readiness(
 
 /// Execute all short-lived commands from the config during the setup phase.
 ///
-/// Commands are executed in BTreeMap order (alphabetical by name).
+/// Commands are executed in declaration order (the order they appear in bugatti.config.toml).
 /// stdout and stderr are captured and stored under the run's logs/ directory.
 /// If any command exits non-zero, execution stops and an error is returned.
 ///
@@ -615,7 +615,7 @@ mod tests {
     use super::*;
     use crate::config::{CommandDef, CommandKind, Config, ProviderConfig};
     use crate::run::{ArtifactDir, RunId};
-    use std::collections::BTreeMap;
+    use indexmap::IndexMap;
 
     fn make_config(commands: Vec<(&str, CommandKind, &str)>) -> Config {
         make_config_with_readiness(
@@ -629,7 +629,7 @@ mod tests {
     fn make_config_with_readiness(
         commands: Vec<(&str, CommandKind, &str, Option<&str>)>,
     ) -> Config {
-        let mut map = BTreeMap::new();
+        let mut map = IndexMap::new();
         for (name, kind, cmd, readiness_url) in commands {
             map.insert(
                 name.to_string(),
@@ -758,7 +758,7 @@ mod tests {
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
         artifact_dir.create_all().unwrap();
 
-        // BTreeMap ordering: "a_first" comes before "b_second"
+        // Insertion ordering: "a_first" was inserted before "b_second"
         let config = make_config(vec![
             ("a_first", CommandKind::ShortLived, "exit 1"),
             ("b_second", CommandKind::ShortLived, "echo should_not_run"),
@@ -990,5 +990,26 @@ mod tests {
         assert_eq!(tracked[0].name, "server");
 
         teardown_processes(&mut tracked);
+    }
+
+    #[test]
+    fn commands_execute_in_declaration_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = RunId("test-run".to_string());
+        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
+        artifact_dir.create_all().unwrap();
+
+        // Insert in reverse-alpha order: z_last first, a_first second.
+        // With BTreeMap this would have executed a_first then z_last.
+        // With IndexMap it must execute z_last then a_first.
+        let config = make_config(vec![
+            ("z_last", CommandKind::ShortLived, "echo z_last"),
+            ("a_first", CommandKind::ShortLived, "echo a_first"),
+        ]);
+
+        let results = run_short_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].name, "z_last");
+        assert_eq!(results[1].name, "a_first");
     }
 }

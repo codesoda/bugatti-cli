@@ -213,10 +213,10 @@ pub fn initialize_run(
 mod tests {
     use super::*;
     use crate::config::{CommandDef, CommandKind, Config, ProviderConfig};
-    use std::collections::BTreeMap;
+    use indexmap::IndexMap;
 
     fn test_config() -> Config {
-        let mut commands = BTreeMap::new();
+        let mut commands = IndexMap::new();
         commands.insert(
             "migrate".to_string(),
             CommandDef {

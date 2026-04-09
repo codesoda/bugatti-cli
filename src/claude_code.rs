@@ -535,7 +535,7 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
 mod tests {
     use super::*;
     use crate::config::{Config, ProviderConfig};
-    use std::collections::BTreeMap;
+    use indexmap::IndexMap;
 
     fn test_config() -> Config {
         Config {
@@ -547,7 +547,7 @@ mod tests {
                 strict_warnings: None,
                 base_url: None,
             },
-            commands: BTreeMap::new(),
+            commands: IndexMap::new(),
             checkpoint: None,
         }
     }
