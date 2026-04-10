@@ -117,13 +117,14 @@ dependencies = [
 
 [[package]]
 name = "bugatti"
-version = "0.3.1"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "clap",
  "ctrlc",
  "flate2",
  "glob",
+ "indexmap",
  "libc",
  "reqwest",
  "self-replace",

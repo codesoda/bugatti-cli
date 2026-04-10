@@ -85,6 +85,27 @@ jobs:
           cd artifacts
           sha256sum *.tar.gz > checksums-sha256.txt
 
+      - name: Extract changelog for release
+        id: changelog
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          # Extract the section between this version's heading and the next heading
+          notes=$(awk -v ver="$version" '
+            /^## \[/ {
+              if (found) exit
+              if ($0 ~ "\\[" ver "\\]") found=1; next
+            }
+            found { print }
+          ' CHANGELOG.md)
+          # Fail if we got nothing — forces you to update CHANGELOG.md before tagging
+          if [ -z "$notes" ]; then
+            echo "::error::No CHANGELOG.md entry found for version ${version}"
+            exit 1
+          fi
+          # Write to file to avoid quoting issues
+          echo "$notes" > release-notes.md
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -92,7 +113,7 @@ jobs:
           tag="${GITHUB_REF#refs/tags/}"
           gh release create "${tag}" \
             --title "${tag}" \
-            --generate-notes \
+            --notes-file release-notes.md \
             --draft \
             artifacts/*.tar.gz \
             artifacts/checksums-sha256.txt

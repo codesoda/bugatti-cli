@@ -1,6 +1,6 @@
 use crate::test_file::ProviderOverrides;
+use indexmap::IndexMap;
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Top-level project configuration loaded from bugatti.config.toml.
@@ -10,7 +10,7 @@ pub struct Config {
     #[serde(default)]
     pub provider: ProviderConfig,
     #[serde(default)]
-    pub commands: BTreeMap<String, CommandDef>,
+    pub commands: IndexMap<String, CommandDef>,
     #[serde(default)]
     pub checkpoint: Option<CheckpointConfig>,
 }
@@ -196,6 +196,7 @@ pub fn load_config(dir: &Path) -> Result<Config, ConfigError> {
 mod tests {
     use super::*;
     use crate::test_file::{ProviderOverrides, Step, TestFile, TestOverrides};
+    use indexmap::IndexMap;
     use std::fs;
 
     #[test]
@@ -244,6 +245,28 @@ readiness_url = "http://localhost:3000/health"
     }
 
     #[test]
+    fn config_preserves_toml_declaration_order() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("bugatti.config.toml"),
+            r#"
+[commands.z_server]
+kind = "long_lived"
+cmd = "sleep 60"
+
+[commands.a_migrate]
+kind = "short_lived"
+cmd = "echo migrate"
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(dir.path()).unwrap();
+        let names: Vec<&String> = config.commands.keys().collect();
+        assert_eq!(names, vec!["z_server", "a_migrate"]);
+    }
+
+    #[test]
     fn missing_config_returns_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let config = load_config(dir.path()).unwrap();
@@ -278,7 +301,7 @@ readiness_url = "http://localhost:3000/health"
                 strict_warnings: None,
                 base_url: None,
             },
-            commands: BTreeMap::new(),
+            commands: IndexMap::new(),
             checkpoint: None,
         };
         let test_file = TestFile {
@@ -321,7 +344,7 @@ readiness_url = "http://localhost:3000/health"
                 strict_warnings: None,
                 base_url: None,
             },
-            commands: BTreeMap::new(),
+            commands: IndexMap::new(),
             checkpoint: None,
         };
         let test_file = TestFile {
@@ -360,7 +383,7 @@ readiness_url = "http://localhost:3000/health"
                 strict_warnings: None,
                 base_url: None,
             },
-            commands: BTreeMap::new(),
+            commands: IndexMap::new(),
             checkpoint: None,
         };
         let test_file = TestFile {
@@ -373,6 +396,7 @@ readiness_url = "http://localhost:3000/health"
                 include_glob: None,
                 step_timeout_secs: None,
                 skip: false,
+                setup: false,
                 checkpoint: None,
             }],
         };
@@ -418,7 +442,7 @@ step_timeout_secs = 600
                 step_timeout_secs: Some(300),
                 ..ProviderConfig::default()
             },
-            commands: BTreeMap::new(),
+            commands: IndexMap::new(),
             checkpoint: None,
         };
         let test_file = TestFile {
@@ -444,7 +468,7 @@ step_timeout_secs = 600
                 step_timeout_secs: Some(300),
                 ..ProviderConfig::default()
             },
-            commands: BTreeMap::new(),
+            commands: IndexMap::new(),
             checkpoint: None,
         };
         let test_file = TestFile {
@@ -486,7 +510,7 @@ strict_warnings = true
                 strict_warnings: Some(true),
                 ..ProviderConfig::default()
             },
-            commands: BTreeMap::new(),
+            commands: IndexMap::new(),
             checkpoint: None,
         };
         let test_file = TestFile {
@@ -532,7 +556,7 @@ base_url = "http://localhost:3000"
                 base_url: Some("http://localhost:3000".to_string()),
                 ..ProviderConfig::default()
             },
-            commands: BTreeMap::new(),
+            commands: IndexMap::new(),
             checkpoint: None,
         };
         let test_file = TestFile {
@@ -561,7 +585,7 @@ base_url = "http://localhost:3000"
                 base_url: Some("http://localhost:3000".to_string()),
                 ..ProviderConfig::default()
             },
-            commands: BTreeMap::new(),
+            commands: IndexMap::new(),
             checkpoint: None,
         };
         let test_file = TestFile {
