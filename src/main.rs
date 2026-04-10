@@ -73,10 +73,15 @@ fn main() {
 
     let cli = Cli::parse();
 
-    let bold = output::ansi("\x1b[1m");
-    let dim = output::ansi("\x1b[38;5;243m");
-    let reset = output::ansi("\x1b[0m");
-    println!("{bold}bugatti{reset} {dim}v{}{reset}", env!("CARGO_PKG_VERSION"));
+    let c = output::colors();
+    println!(
+        "{}bugatti{} {}v{}{}",
+        c.bold,
+        c.reset,
+        c.dim,
+        env!("CARGO_PKG_VERSION"),
+        c.reset
+    );
     println!();
 
     let is_update_command = matches!(&cli.command, Commands::Update { .. });
@@ -385,9 +390,10 @@ fn run_test_with_artifacts(
     );
 
     // Print per-test run info
-    let dim = output::ansi("\x1b[38;5;243m");
-    let light = output::ansi("\x1b[38;5;250m");
-    let reset = output::ansi("\x1b[0m");
+    let c = output::colors();
+    let dim = c.dim;
+    let light = c.light;
+    let reset = c.reset;
     if ctx.effective.provider.agent_args.is_empty() {
         println!("  {dim}Provider:{reset}  {}", ctx.effective.provider.name);
     } else {
