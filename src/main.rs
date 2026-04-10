@@ -73,7 +73,7 @@ fn main() {
 
     let cli = Cli::parse();
 
-    let c = output::colors();
+    let c = output::stdout_colors();
     println!(
         "{}bugatti{} {}v{}{}",
         c.bold,
@@ -390,7 +390,7 @@ fn run_test_with_artifacts(
     );
 
     // Print per-test run info
-    let c = output::colors();
+    let c = output::stdout_colors();
     let dim = c.dim;
     let light = c.light;
     let reset = c.reset;

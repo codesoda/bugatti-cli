@@ -146,7 +146,7 @@ impl ClaudeCodeAdapter {
             .stderr(Stdio::piped());
 
         if self.verbose {
-            let c = output::colors();
+            let c = output::stderr_colors();
             let args: Vec<_> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().to_string())
@@ -206,7 +206,7 @@ impl ClaudeCodeAdapter {
         let input_line = format_stream_input(message);
 
         if self.verbose {
-            let c = output::colors();
+            let c = output::stderr_colors();
             eprintln!(
                 "{}[verbose]{} {}prompt ({} bytes):{}",
                 c.dim,
@@ -341,6 +341,8 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
             return None;
         }
 
+        let c = output::stderr_colors();
+
         loop {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
@@ -374,7 +376,6 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                             }
                                             "tool_use" => {
                                                 if self.verbose {
-                                                    let c = output::colors();
                                                     let name =
                                                         block.name.as_deref().unwrap_or("unknown");
                                                     let input_preview = block
@@ -430,7 +431,6 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                             "thinking" => {
                                                 if self.verbose {
                                                     if let Some(thinking) = &block.thinking {
-                                                        let c = output::colors();
                                                         eprintln!(
                                                             "{}[verbose]{} {}thinking:{}",
                                                             c.dim, c.reset, c.dim, c.reset
@@ -451,7 +451,6 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                     if let Some(msg) = &event.message {
                                         for block in &msg.content {
                                             if block.block_type == "tool_result" {
-                                                let c = output::colors();
                                                 let result_text = block
                                                     .content
                                                     .as_ref()

@@ -1,6 +1,12 @@
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
+#[derive(Clone, Copy, Debug)]
+pub enum Stream {
+    Stdout,
+    Stderr,
+}
+
 /// Shared ANSI palette used by terminal output formatting.
 #[derive(Debug)]
 pub struct Colors {
@@ -18,13 +24,20 @@ pub struct Colors {
 }
 
 static COLORS: OnceLock<Colors> = OnceLock::new();
+static STDERR_COLORS: OnceLock<Colors> = OnceLock::new();
 
-fn detect_color_enabled() -> bool {
-    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+fn detect_color_enabled(stream: Stream) -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+
+    match stream {
+        Stream::Stdout => std::io::stdout().is_terminal(),
+        Stream::Stderr => std::io::stderr().is_terminal(),
+    }
 }
 
-fn build_colors() -> Colors {
-    let enabled = detect_color_enabled();
+fn build_colors(enabled: bool) -> Colors {
     let code = |value| if enabled { value } else { "" };
 
     Colors {
@@ -44,7 +57,17 @@ fn build_colors() -> Colors {
 
 /// Returns a lazily initialized singleton color palette.
 pub fn colors() -> &'static Colors {
-    COLORS.get_or_init(build_colors)
+    stdout_colors()
+}
+
+/// Returns a lazily initialized stdout color palette.
+pub fn stdout_colors() -> &'static Colors {
+    COLORS.get_or_init(|| build_colors(detect_color_enabled(Stream::Stdout)))
+}
+
+/// Returns a lazily initialized stderr color palette.
+pub fn stderr_colors() -> &'static Colors {
+    STDERR_COLORS.get_or_init(|| build_colors(detect_color_enabled(Stream::Stderr)))
 }
 
 /// Returns whether ANSI color output should be enabled.
@@ -53,12 +76,26 @@ pub fn colors() -> &'static Colors {
 /// - `NO_COLOR` is set to any value
 /// - stdout is not a terminal (e.g. piped/redirected)
 pub fn color_enabled() -> bool {
-    colors().enabled
+    stdout_colors().enabled
+}
+
+/// Returns whether ANSI color output should be enabled for stderr.
+pub fn color_enabled_stderr() -> bool {
+    stderr_colors().enabled
 }
 
 /// Returns `code` when color is enabled, otherwise an empty string.
 pub fn ansi(code: &'static str) -> &'static str {
-    if colors().enabled {
+    if stdout_colors().enabled {
+        code
+    } else {
+        ""
+    }
+}
+
+/// Returns `code` when stderr color is enabled, otherwise an empty string.
+pub fn ansi_stderr(code: &'static str) -> &'static str {
+    if stderr_colors().enabled {
         code
     } else {
         ""
@@ -66,5 +103,8 @@ pub fn ansi(code: &'static str) -> &'static str {
 }
 
 pub mod prelude {
-    pub use super::{ansi, color_enabled, colors, Colors};
+    pub use super::{
+        ansi, ansi_stderr, color_enabled, color_enabled_stderr, colors, stderr_colors,
+        stdout_colors, Colors, Stream,
+    };
 }
