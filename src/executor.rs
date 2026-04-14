@@ -706,14 +706,18 @@ pub fn execute_steps(
     // Setup steps don't count toward pass/fail — only test steps determine the verdict.
     // A failed setup step aborts the run (handled above), so if we reach here,
     // all setup steps succeeded.
-    let all_passed = outcomes
-        .iter()
-        .filter(|o| !o.setup)
-        .all(|o| o.result.is_pass());
+    // If the run was interrupted, force all_passed to false — partial runs are not passing.
+    // Load once to avoid TOCTOU race between all_passed and print_run_summary.
+    let was_interrupted = interrupted.load(Ordering::Relaxed);
+    let all_passed = !was_interrupted
+        && outcomes
+            .iter()
+            .filter(|o| !o.setup)
+            .all(|o| o.result.is_pass());
     let total_duration = run_start.elapsed();
 
     // Print final run status (after teardown)
-    print_run_summary(&outcomes, total_duration, total_steps);
+    print_run_summary(&outcomes, total_duration, total_steps, was_interrupted);
 
     // Flush/close the full transcript file
     drop(full_transcript_file);
@@ -774,7 +778,12 @@ fn print_step_result(result: &StepResult, duration: Duration) {
 }
 
 /// Print a summary of the full run after all steps have completed.
-fn print_run_summary(outcomes: &[StepOutcome], total_duration: Duration, total_steps: usize) {
+fn print_run_summary(
+    outcomes: &[StepOutcome],
+    total_duration: Duration,
+    total_steps: usize,
+    was_interrupted: bool,
+) {
     println!();
     println!("═══════════════════════════════════════════════════");
 
@@ -795,8 +804,14 @@ fn print_run_summary(outcomes: &[StepOutcome], total_duration: Duration, total_s
         .count();
     let skipped = total_steps - completed - setup_count;
 
-    let all_passed = test_outcomes.iter().all(|o| o.result.is_pass());
-    let status = if all_passed { "PASSED" } else { "FAILED" };
+    let all_passed = !was_interrupted && test_outcomes.iter().all(|o| o.result.is_pass());
+    let status = if was_interrupted {
+        "INTERRUPTED"
+    } else if all_passed {
+        "PASSED"
+    } else {
+        "FAILED"
+    };
 
     let setup_part = if setup_count > 0 {
         format!(", {setup_count} setup")
@@ -1945,6 +1960,8 @@ mod tests {
 
         // No steps should have executed
         assert_eq!(outcome.steps.len(), 0);
+        // Interrupted runs must not report as passed
+        assert!(!outcome.all_passed);
     }
 
     // --- Setup step tests ---

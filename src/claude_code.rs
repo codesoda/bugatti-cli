@@ -145,8 +145,7 @@ impl ClaudeCodeAdapter {
             .arg("--input-format")
             .arg("stream-json")
             .arg("--output-format")
-            .arg("stream-json")
-            .arg("--no-session-persistence");
+            .arg("stream-json");
 
         for arg in &self.agent_args {
             cmd.arg(arg);
