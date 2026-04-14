@@ -707,7 +707,9 @@ pub fn execute_steps(
     // A failed setup step aborts the run (handled above), so if we reach here,
     // all setup steps succeeded.
     // If the run was interrupted, force all_passed to false — partial runs are not passing.
-    let all_passed = !interrupted.load(Ordering::Relaxed)
+    // Load once to avoid TOCTOU race between all_passed and print_run_summary.
+    let was_interrupted = interrupted.load(Ordering::Relaxed);
+    let all_passed = !was_interrupted
         && outcomes
             .iter()
             .filter(|o| !o.setup)
@@ -715,12 +717,7 @@ pub fn execute_steps(
     let total_duration = run_start.elapsed();
 
     // Print final run status (after teardown)
-    print_run_summary(
-        &outcomes,
-        total_duration,
-        total_steps,
-        interrupted.load(Ordering::Relaxed),
-    );
+    print_run_summary(&outcomes, total_duration, total_steps, was_interrupted);
 
     // Flush/close the full transcript file
     drop(full_transcript_file);
@@ -1963,6 +1960,8 @@ mod tests {
 
         // No steps should have executed
         assert_eq!(outcome.steps.len(), 0);
+        // Interrupted runs must not report as passed
+        assert!(!outcome.all_passed);
     }
 
     // --- Setup step tests ---

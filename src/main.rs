@@ -563,7 +563,7 @@ fn run_test_with_artifacts(
 
     // Phase 15: Write report
     let end_time = chrono::Utc::now();
-    let exit_code = if INTERRUPTED.load(Ordering::Relaxed) {
+    let exit_code = if is_interrupted() {
         EXIT_INTERRUPTED
     } else {
         exit_code::exit_code_for_run_strict(&outcome, ctx.strict_warnings)
