@@ -1,31 +1,10 @@
 use crate::config::Config;
+use crate::output;
 use crate::provider::{AgentSession, BootstrapMessage, OutputChunk, ProviderError, StepMessage};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-
-/// ANSI color codes for verbose output.
-mod color {
-    // Label prefix — dim grey
-    pub const DIM: &str = "\x1b[38;5;243m";
-    // Content text — lighter grey
-    pub const LIGHT: &str = "\x1b[38;5;250m";
-    // Tool names — soft blue
-    pub const TOOL: &str = "\x1b[38;5;111m";
-    // Thinking — soft purple
-    pub const THINKING: &str = "\x1b[38;5;183m";
-    // Tool result — soft green
-    pub const RESULT: &str = "\x1b[38;5;151m";
-    // Message/prompt — soft yellow
-    pub const PROMPT: &str = "\x1b[38;5;223m";
-    // Launch command — soft cyan
-    pub const CMD: &str = "\x1b[38;5;152m";
-    // Separator — very dim
-    pub const SEP: &str = "\x1b[38;5;238m";
-    // Reset
-    pub const RESET: &str = "\x1b[0m";
-}
 
 /// Claude Code CLI provider adapter.
 ///
@@ -166,25 +145,26 @@ impl ClaudeCodeAdapter {
             .stderr(Stdio::piped());
 
         if self.verbose {
+            let c = output::stderr_colors();
             let args: Vec<_> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().to_string())
                 .collect();
             eprintln!(
                 "{}[verbose]{} {}launch:{} {} {}{}",
-                color::DIM,
-                color::RESET,
-                color::DIM,
-                color::RESET,
-                color::CMD,
+                c.dim,
+                c.reset,
+                c.dim,
+                c.reset,
+                c.cmd,
                 args.join(" "),
-                color::RESET
+                c.reset
             );
             eprintln!(
                 "{}         binary: {}{}",
-                color::DIM,
+                c.dim,
                 cmd.get_program().to_string_lossy(),
-                color::RESET
+                c.reset
             );
         }
 
@@ -225,16 +205,17 @@ impl ClaudeCodeAdapter {
         let input_line = format_stream_input(message);
 
         if self.verbose {
+            let c = output::stderr_colors();
             eprintln!(
                 "{}[verbose]{} {}prompt ({} bytes):{}",
-                color::DIM,
-                color::RESET,
-                color::DIM,
+                c.dim,
+                c.reset,
+                c.dim,
                 message.len(),
-                color::RESET
+                c.reset
             );
-            eprintln!("{}{}{}", color::PROMPT, message, color::RESET);
-            eprintln!("{}───{}", color::SEP, color::RESET);
+            eprintln!("{}{}{}", c.prompt, message, c.reset);
+            eprintln!("{}───{}", c.sep, c.reset);
         }
 
         stdin
@@ -359,6 +340,8 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
             return None;
         }
 
+        let c = output::stderr_colors();
+
         loop {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
@@ -426,7 +409,22 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                         .chars()
                                                         .take(12)
                                                         .collect::<String>();
-                                                    eprintln!("{}[verbose]{} {}tool:{} {}{}{} {}{}{} {}({}){}", color::DIM, color::RESET, color::DIM, color::RESET, color::TOOL, name, color::RESET, color::LIGHT, input_preview, color::RESET, color::DIM, id_short, color::RESET);
+                                                    eprintln!(
+                                                        "{}[verbose]{} {}tool:{} {}{}{} {}{}{} {}({}){}",
+                                                        c.dim,
+                                                        c.reset,
+                                                        c.dim,
+                                                        c.reset,
+                                                        c.tool,
+                                                        name,
+                                                        c.reset,
+                                                        c.light,
+                                                        input_preview,
+                                                        c.reset,
+                                                        c.dim,
+                                                        id_short,
+                                                        c.reset
+                                                    );
                                                 }
                                             }
                                             "thinking" => {
@@ -434,17 +432,9 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                     if let Some(thinking) = &block.thinking {
                                                         eprintln!(
                                                             "{}[verbose]{} {}thinking:{}",
-                                                            color::DIM,
-                                                            color::RESET,
-                                                            color::DIM,
-                                                            color::RESET
+                                                            c.dim, c.reset, c.dim, c.reset
                                                         );
-                                                        eprintln!(
-                                                            "{}{}{}",
-                                                            color::THINKING,
-                                                            thinking,
-                                                            color::RESET
-                                                        );
+                                                        eprintln!("{}{}{}", c.thinking, thinking, c.reset);
                                                     }
                                                 }
                                             }
@@ -478,20 +468,15 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                     .collect::<String>();
                                                 eprintln!(
                                                     "{}[verbose]{} {}result:{} {}({}){}",
-                                                    color::DIM,
-                                                    color::RESET,
-                                                    color::DIM,
-                                                    color::RESET,
-                                                    color::DIM,
+                                                    c.dim,
+                                                    c.reset,
+                                                    c.dim,
+                                                    c.reset,
+                                                    c.dim,
                                                     id_short,
-                                                    color::RESET
+                                                    c.reset
                                                 );
-                                                eprintln!(
-                                                    "{}{}{}",
-                                                    color::RESULT,
-                                                    result_text,
-                                                    color::RESET
-                                                );
+                                                eprintln!("{}{}{}", c.result, result_text, c.reset);
                                             }
                                         }
                                     }

@@ -15,6 +15,7 @@ use bugatti::exit_code::{
     EXIT_STEP_ERROR,
 };
 use bugatti::expand;
+use bugatti::output;
 use bugatti::provider::AgentSession;
 use bugatti::report::{self, ReportInput};
 use bugatti::run::{self, ArtifactDir, EffectiveConfigSummary};
@@ -72,9 +73,14 @@ fn main() {
 
     let cli = Cli::parse();
 
+    let c = output::stdout_colors();
     println!(
-        "\x1b[1mbugatti\x1b[0m \x1b[38;5;243mv{}\x1b[0m",
-        env!("CARGO_PKG_VERSION")
+        "{}bugatti{} {}v{}{}",
+        c.bold,
+        c.reset,
+        c.dim,
+        env!("CARGO_PKG_VERSION"),
+        c.reset
     );
     println!();
 
@@ -384,9 +390,10 @@ fn run_test_with_artifacts(
     );
 
     // Print per-test run info
-    let dim = "\x1b[38;5;243m";
-    let light = "\x1b[38;5;250m";
-    let reset = "\x1b[0m";
+    let c = output::stdout_colors();
+    let dim = c.dim;
+    let light = c.light;
+    let reset = c.reset;
     if ctx.effective.provider.agent_args.is_empty() {
         println!("  {dim}Provider:{reset}  {}", ctx.effective.provider.name);
     } else {
