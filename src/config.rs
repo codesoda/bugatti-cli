@@ -153,8 +153,14 @@ pub enum ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConfigError::ReadError(e) => write!(f, "failed to read bugatti.config.toml: {e}"),
-            ConfigError::ParseError(e) => write!(f, "invalid bugatti.config.toml: {e}"),
+            ConfigError::ReadError(e) => write!(
+                f,
+                "failed to read bugatti.config.toml: {e}. Check that the file exists and is readable."
+            ),
+            ConfigError::ParseError(e) => write!(
+                f,
+                "invalid bugatti.config.toml: {e}. See https://bugatti.dev/llms/cli-reference.txt for config format."
+            ),
         }
     }
 }
@@ -288,6 +294,18 @@ cmd = "echo migrate"
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("invalid bugatti.config.toml"));
+        assert!(err_msg.contains("https://bugatti.dev/llms/cli-reference.txt"));
+    }
+
+    #[test]
+    fn read_error_includes_actionable_hint() {
+        let err_msg = ConfigError::ReadError(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ))
+        .to_string();
+        assert!(err_msg.contains("failed to read bugatti.config.toml"));
+        assert!(err_msg.contains("Check that the file exists and is readable"));
     }
 
     #[test]
