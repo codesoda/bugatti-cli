@@ -15,6 +15,7 @@ use bugatti::exit_code::{
     EXIT_STEP_ERROR,
 };
 use bugatti::expand;
+use bugatti::output;
 use bugatti::provider::AgentSession;
 use bugatti::report::{self, ReportInput};
 use bugatti::run::{self, ArtifactDir, EffectiveConfigSummary};
@@ -33,6 +34,39 @@ fn relative_display(path: &Path) -> String {
                 .map(|p| p.display().to_string())
         })
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Build shorthand test file candidate by appending `.test.toml`.
+///
+/// Returns `None` when the input already ends with `.test.toml`.
+fn shorthand_test_path(input: &str) -> Option<PathBuf> {
+    if input.ends_with(".test.toml") {
+        return None;
+    }
+
+    let mut candidate = String::with_capacity(input.len() + ".test.toml".len());
+    candidate.push_str(input);
+    candidate.push_str(".test.toml");
+    Some(PathBuf::from(candidate))
+}
+
+/// Resolve a user-provided test path.
+///
+/// Resolution order:
+/// 1) exact path as provided
+/// 2) shorthand fallback `<input>.test.toml`
+fn resolve_test_path(input: &str) -> Option<PathBuf> {
+    let direct = PathBuf::from(input);
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    let shorthand = shorthand_test_path(input)?;
+    if shorthand.is_file() {
+        Some(shorthand)
+    } else {
+        None
+    }
 }
 
 /// Check whether the run has been interrupted by Ctrl+C.
@@ -72,9 +106,14 @@ fn main() {
 
     let cli = Cli::parse();
 
+    let c = output::stdout_colors();
     println!(
-        "\x1b[1mbugatti\x1b[0m \x1b[38;5;243mv{}\x1b[0m",
-        env!("CARGO_PKG_VERSION")
+        "{}bugatti{} {}v{}{}",
+        c.bold,
+        c.reset,
+        c.dim,
+        env!("CARGO_PKG_VERSION"),
+        c.reset
     );
     println!();
 
@@ -105,12 +144,8 @@ fn main() {
                 println!("Skipping commands: {}", skip_cmds.join(", "));
             }
             match path {
-                Some(p) => {
-                    let test_path = PathBuf::from(&p);
-                    if !test_path.exists() {
-                        eprintln!("ERROR: test file not found: {p}");
-                        EXIT_CONFIG_ERROR
-                    } else {
+                Some(p) => match resolve_test_path(&p) {
+                    Some(test_path) => {
                         let result = run_test_pipeline(
                             &project_root,
                             &test_path,
@@ -134,7 +169,18 @@ fn main() {
                         );
                         result.exit_code
                     }
-                }
+                    None => {
+                        if let Some(shorthand) = shorthand_test_path(&p) {
+                            eprintln!(
+                                "ERROR: test file not found: {p} (also tried {})",
+                                shorthand.display()
+                            );
+                        } else {
+                            eprintln!("ERROR: test file not found: {p}");
+                        }
+                        EXIT_CONFIG_ERROR
+                    }
+                },
                 None => run_discovery(
                     &project_root,
                     &skip_cmds,
@@ -384,9 +430,10 @@ fn run_test_with_artifacts(
     );
 
     // Print per-test run info
-    let dim = "\x1b[38;5;243m";
-    let light = "\x1b[38;5;250m";
-    let reset = "\x1b[0m";
+    let c = output::stdout_colors();
+    let dim = c.dim;
+    let light = c.light;
+    let reset = c.reset;
     if ctx.effective.provider.agent_args.is_empty() {
         println!("  {dim}Provider:{reset}  {}", ctx.effective.provider.name);
     } else {
@@ -789,8 +836,11 @@ fn print_run_references(results: &[TestRunResult]) {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use std::path::PathBuf;
 
     use bugatti::cli::Cli;
+
+    use crate::{resolve_test_path, shorthand_test_path};
 
     #[test]
     fn test_subcommand_no_path() {
@@ -946,5 +996,54 @@ mod tests {
             }
             Ok(_) => panic!("--help should produce an error-like result from clap"),
         }
+    }
+
+    #[test]
+    fn test_shorthand_test_path_appends_suffix() {
+        let candidate = shorthand_test_path("ftue").expect("candidate should exist");
+        assert_eq!(candidate, PathBuf::from("ftue.test.toml"));
+    }
+
+    #[test]
+    fn test_shorthand_test_path_skips_when_already_full_name() {
+        assert!(shorthand_test_path("ftue.test.toml").is_none());
+    }
+
+    #[test]
+    fn test_resolve_test_path_prefers_exact_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let exact = tmp.path().join("login.test.toml");
+        std::fs::write(&exact, "name = \"login\"\nsteps = []\n").expect("write file");
+
+        let resolved = resolve_test_path(exact.to_string_lossy().as_ref());
+        assert_eq!(resolved, Some(exact));
+    }
+
+    #[test]
+    fn test_resolve_test_path_uses_shorthand_fallback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fallback = tmp.path().join("ftue.test.toml");
+        std::fs::write(&fallback, "name = \"ftue\"\nsteps = []\n").expect("write file");
+
+        let shorthand_input = tmp.path().join("ftue");
+        let resolved = resolve_test_path(shorthand_input.to_string_lossy().as_ref());
+        assert_eq!(resolved, Some(fallback));
+    }
+
+    #[test]
+    fn test_resolve_test_path_missing_returns_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let shorthand_input = tmp.path().join("does-not-exist");
+        assert!(resolve_test_path(shorthand_input.to_string_lossy().as_ref()).is_none());
+    }
+
+    #[test]
+    fn test_resolve_test_path_rejects_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let direct_dir = tmp.path().join("folder-as-input");
+        std::fs::create_dir_all(&direct_dir).expect("create dir");
+
+        let resolved = resolve_test_path(direct_dir.to_string_lossy().as_ref());
+        assert!(resolved.is_none());
     }
 }
