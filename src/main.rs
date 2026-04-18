@@ -36,6 +36,39 @@ fn relative_display(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Build shorthand test file candidate by appending `.test.toml`.
+///
+/// Returns `None` when the input already ends with `.test.toml`.
+fn shorthand_test_path(input: &str) -> Option<PathBuf> {
+    if input.ends_with(".test.toml") {
+        return None;
+    }
+
+    let mut candidate = String::with_capacity(input.len() + ".test.toml".len());
+    candidate.push_str(input);
+    candidate.push_str(".test.toml");
+    Some(PathBuf::from(candidate))
+}
+
+/// Resolve a user-provided test path.
+///
+/// Resolution order:
+/// 1) exact path as provided
+/// 2) shorthand fallback `<input>.test.toml`
+fn resolve_test_path(input: &str) -> Option<PathBuf> {
+    let direct = PathBuf::from(input);
+    if direct.exists() {
+        return Some(direct);
+    }
+
+    let shorthand = shorthand_test_path(input)?;
+    if shorthand.exists() {
+        Some(shorthand)
+    } else {
+        None
+    }
+}
+
 /// Check whether the run has been interrupted by Ctrl+C.
 pub fn is_interrupted() -> bool {
     INTERRUPTED.load(Ordering::Relaxed)
@@ -111,12 +144,8 @@ fn main() {
                 println!("Skipping commands: {}", skip_cmds.join(", "));
             }
             match path {
-                Some(p) => {
-                    let test_path = PathBuf::from(&p);
-                    if !test_path.exists() {
-                        eprintln!("ERROR: test file not found: {p}");
-                        EXIT_CONFIG_ERROR
-                    } else {
+                Some(p) => match resolve_test_path(&p) {
+                    Some(test_path) => {
                         let result = run_test_pipeline(
                             &project_root,
                             &test_path,
@@ -140,7 +169,18 @@ fn main() {
                         );
                         result.exit_code
                     }
-                }
+                    None => {
+                        if let Some(shorthand) = shorthand_test_path(&p) {
+                            eprintln!(
+                                "ERROR: test file not found: {p} (also tried {})",
+                                shorthand.display()
+                            );
+                        } else {
+                            eprintln!("ERROR: test file not found: {p}");
+                        }
+                        EXIT_CONFIG_ERROR
+                    }
+                },
                 None => run_discovery(
                     &project_root,
                     &skip_cmds,
@@ -792,8 +832,11 @@ fn print_run_references(results: &[TestRunResult]) {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use std::path::PathBuf;
 
     use bugatti::cli::Cli;
+
+    use crate::{resolve_test_path, shorthand_test_path};
 
     #[test]
     fn test_subcommand_no_path() {
@@ -949,5 +992,44 @@ mod tests {
             }
             Ok(_) => panic!("--help should produce an error-like result from clap"),
         }
+    }
+
+    #[test]
+    fn test_shorthand_test_path_appends_suffix() {
+        let candidate = shorthand_test_path("ftue").expect("candidate should exist");
+        assert_eq!(candidate, PathBuf::from("ftue.test.toml"));
+    }
+
+    #[test]
+    fn test_shorthand_test_path_skips_when_already_full_name() {
+        assert!(shorthand_test_path("ftue.test.toml").is_none());
+    }
+
+    #[test]
+    fn test_resolve_test_path_prefers_exact_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let exact = tmp.path().join("login.test.toml");
+        std::fs::write(&exact, "name = \"login\"\nsteps = []\n").expect("write file");
+
+        let resolved = resolve_test_path(exact.to_string_lossy().as_ref());
+        assert_eq!(resolved, Some(exact));
+    }
+
+    #[test]
+    fn test_resolve_test_path_uses_shorthand_fallback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fallback = tmp.path().join("ftue.test.toml");
+        std::fs::write(&fallback, "name = \"ftue\"\nsteps = []\n").expect("write file");
+
+        let shorthand_input = tmp.path().join("ftue");
+        let resolved = resolve_test_path(shorthand_input.to_string_lossy().as_ref());
+        assert_eq!(resolved, Some(fallback));
+    }
+
+    #[test]
+    fn test_resolve_test_path_missing_returns_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let shorthand_input = tmp.path().join("does-not-exist");
+        assert!(resolve_test_path(shorthand_input.to_string_lossy().as_ref()).is_none());
     }
 }
