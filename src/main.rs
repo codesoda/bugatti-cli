@@ -57,12 +57,12 @@ fn shorthand_test_path(input: &str) -> Option<PathBuf> {
 /// 2) shorthand fallback `<input>.test.toml`
 fn resolve_test_path(input: &str) -> Option<PathBuf> {
     let direct = PathBuf::from(input);
-    if direct.exists() {
+    if direct.is_file() {
         return Some(direct);
     }
 
     let shorthand = shorthand_test_path(input)?;
-    if shorthand.exists() {
+    if shorthand.is_file() {
         Some(shorthand)
     } else {
         None
@@ -1031,5 +1031,15 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let shorthand_input = tmp.path().join("does-not-exist");
         assert!(resolve_test_path(shorthand_input.to_string_lossy().as_ref()).is_none());
+    }
+
+    #[test]
+    fn test_resolve_test_path_rejects_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let direct_dir = tmp.path().join("folder-as-input");
+        std::fs::create_dir_all(&direct_dir).expect("create dir");
+
+        let resolved = resolve_test_path(direct_dir.to_string_lossy().as_ref());
+        assert!(resolved.is_none());
     }
 }

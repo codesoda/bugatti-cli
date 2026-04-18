@@ -238,6 +238,11 @@ impl ClaudeCodeAdapter {
             reader,
             done: false,
             verbose: self.verbose,
+            colors: if self.verbose {
+                Some(output::stderr_colors())
+            } else {
+                None
+            },
         }))
     }
 }
@@ -331,6 +336,7 @@ struct StreamTurnIterator<'a> {
     reader: &'a mut BufReader<std::process::ChildStdout>,
     done: bool,
     verbose: bool,
+    colors: Option<&'static output::Colors>,
 }
 
 impl<'a> Iterator for StreamTurnIterator<'a> {
@@ -341,7 +347,7 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
             return None;
         }
 
-        let c = output::stderr_colors();
+        let c = if self.verbose { self.colors } else { None };
 
         loop {
             let mut line = String::new();
@@ -375,7 +381,7 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                 }
                                             }
                                             "tool_use" => {
-                                                if self.verbose {
+                                                if let Some(c) = c {
                                                     let name =
                                                         block.name.as_deref().unwrap_or("unknown");
                                                     let input_preview = block
@@ -429,7 +435,7 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                 }
                                             }
                                             "thinking" => {
-                                                if self.verbose {
+                                                if let Some(c) = c {
                                                     if let Some(thinking) = &block.thinking {
                                                         eprintln!(
                                                             "{}[verbose]{} {}thinking:{}",
@@ -447,7 +453,7 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                             }
                             "user" => {
                                 // Tool results — log in verbose mode
-                                if self.verbose {
+                                if let Some(c) = c {
                                     if let Some(msg) = &event.message {
                                         for block in &msg.content {
                                             if block.block_type == "tool_result" {
@@ -639,6 +645,7 @@ mod tests {
             reader: unsafe { &mut *(&mut reader as *mut BufReader<std::process::ChildStdout>) },
             done: false,
             verbose: false,
+            colors: None,
         };
 
         let mut collected = Vec::new();
@@ -671,6 +678,7 @@ mod tests {
             reader: unsafe { &mut *(&mut reader as *mut BufReader<std::process::ChildStdout>) },
             done: false,
             verbose: false,
+            colors: None,
         };
 
         let result = iter.next();
@@ -700,6 +708,7 @@ mod tests {
             reader: unsafe { &mut *(&mut reader as *mut BufReader<std::process::ChildStdout>) },
             done: false,
             verbose: false,
+            colors: None,
         };
 
         let mut texts = Vec::new();
