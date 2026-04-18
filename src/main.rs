@@ -49,15 +49,20 @@ fn no_root_tests_found_message() -> &'static str {
 
 /// Build a provider-initialization error with actionable guidance for common setup misses.
 fn provider_initialization_error_message(err: &ProviderError) -> String {
-    let msg = err.to_string();
-    if msg.contains("claude CLI binary not found in PATH")
-        && !msg.contains("Install Claude Code:")
-    {
-        return format!(
-            "{msg}. Install Claude Code: https://docs.anthropic.com/en/docs/claude-code"
-        );
+    match err {
+        ProviderError::InitializationFailed(inner) => {
+            if inner.contains("claude CLI binary not found in PATH")
+                && !inner.contains("Install Claude Code:")
+            {
+                format!(
+                    "provider initialization failed: {inner}. Install Claude Code: https://docs.anthropic.com/en/docs/claude-code"
+                )
+            } else {
+                err.to_string()
+            }
+        }
+        _ => err.to_string(),
     }
-    msg
 }
 
 /// Check whether the run has been interrupted by Ctrl+C.
@@ -1008,5 +1013,15 @@ mod tests {
         let err = ProviderError::InitializationFailed("some other init error".to_string());
         let msg = provider_initialization_error_message(&err);
         assert_eq!(msg, "provider initialization failed: some other init error");
+    }
+
+    #[test]
+    fn test_provider_initialization_error_message_does_not_duplicate_install_hint() {
+        let err = ProviderError::InitializationFailed(
+            "claude CLI binary not found in PATH: No such file or directory. Install Claude Code: https://docs.anthropic.com/en/docs/claude-code"
+                .to_string(),
+        );
+        let msg = provider_initialization_error_message(&err);
+        assert_eq!(msg, err.to_string());
     }
 }
