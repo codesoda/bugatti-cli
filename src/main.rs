@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use bugatti::claude_code::ClaudeCodeAdapter;
 use bugatti::cli::{Cli, Commands};
 use bugatti::command::{self, TrackedProcess};
 use bugatti::config;
@@ -14,6 +15,7 @@ use bugatti::exit_code::{
     EXIT_STEP_ERROR,
 };
 use bugatti::expand;
+use bugatti::provider::AgentSession;
 use bugatti::report::{self, ReportInput};
 use bugatti::run::{self, ArtifactDir, EffectiveConfigSummary};
 use bugatti::test_file;
@@ -483,21 +485,18 @@ fn run_test_with_artifacts(
     };
 
     // Phase 10: Initialize provider session
-    let mut session = match bugatti::provider::initialize_session(
-        ctx.effective,
-        &ctx.artifact_dir.root,
-        ctx.verbose,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "provider initialization failed");
-            return ctx.fail_early(
-                EXIT_PROVIDER_ERROR,
-                format!("provider initialization failed: {e}"),
-                &mut tracked_processes,
-            );
-        }
-    };
+    let mut session =
+        match ClaudeCodeAdapter::initialize(ctx.effective, &ctx.artifact_dir.root, ctx.verbose) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "provider initialization failed");
+                return ctx.fail_early(
+                    EXIT_PROVIDER_ERROR,
+                    format!("provider initialization failed: {e}"),
+                    &mut tracked_processes,
+                );
+            }
+        };
 
     if let Err(e) = session.start() {
         tracing::error!(error = %e, "provider start failed");
@@ -536,7 +535,7 @@ fn run_test_with_artifacts(
         .step_timeout_secs
         .map(std::time::Duration::from_secs);
     let outcome = match executor::execute_steps(
-        &mut *session,
+        &mut session,
         &steps,
         ctx.run_id,
         ctx.session_id,
