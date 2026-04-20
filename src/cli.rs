@@ -73,5 +73,12 @@ pub enum Commands {
         /// Enable verbose output: show full prompts, provider command lines, and timing details.
         #[arg(long, short)]
         verbose: bool,
+
+        /// Explicit path to a bugatti.config.toml file.
+        /// When set, the file must exist — a missing file is a hard error.
+        /// When omitted, bugatti looks for bugatti.config.toml in the current directory
+        /// and warns loudly if it is not found.
+        #[arg(long = "config", value_name = "PATH")]
+        config_path: Option<String>,
     },
 }
