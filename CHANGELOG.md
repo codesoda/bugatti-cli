@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-04-20
+
+### Added
+
+- `--config <PATH>` flag on `bugatti test` to point at an explicit `bugatti.config.toml`; a missing file is now a hard error instead of a silent fallback (#45)
+
+### Fixed
+
+- Print a stderr `WARNING:` when no `bugatti.config.toml` is found in the current directory instead of only logging an `INFO` line to `diagnostics/harness_trace.jsonl`, so the silent fallback to defaults is visible in the terminal and run report (#45)
+
 ## [0.4.1] - 2026-04-13
 
 ### Fixed
