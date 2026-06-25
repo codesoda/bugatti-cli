@@ -627,8 +627,7 @@ exit 0
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
         let args_out = tmp.path().join("pi_args.txt");
-        let mut adapter =
-            make_adapter(write_arg_recording_pi(tmp.path(), &args_out), artifact_dir);
+        let mut adapter = make_adapter(write_arg_recording_pi(tmp.path(), &args_out), artifact_dir);
 
         let bootstrap = "## Result Contract\nEmit `RESULT OK` as the final line.";
         adapter.bootstrap_content = Some(bootstrap.to_string());
