@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-25
+
+### Fixed
+
+- `pi` provider: the driving agent now reliably emits the required `RESULT` marker. Previously the harness bootstrap (carrying the RESULT-marker protocol) was appended onto `pi`'s large default system prompt via `--append-system-prompt`, where the standing protocol rule got buried and silently dropped — every step failed with `PROTOCOL ERROR: output ended without a valid RESULT marker` even though the underlying task succeeded. The adapter now sets a compact base `--system-prompt` so the appended bootstrap stays prominent, and passes the bootstrap as inline content rather than a file path (#47).
+
 ## [0.5.0] - 2026-06-25
 
 ### Added

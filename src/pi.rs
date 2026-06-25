@@ -7,13 +7,31 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
+/// Compact base system prompt for the driving `pi` agent.
+///
+/// Kept deliberately small so the harness bootstrap appended after it (via
+/// `--append-system-prompt`) stays prominent and its RESULT-marker protocol is
+/// reliably followed. Replacing pi's verbose default coding-assistant prompt
+/// does not remove tool access — tools are registered independently of the
+/// prompt text.
+const PI_BASE_SYSTEM_PROMPT: &str = "You are an expert coding assistant operating inside pi, driven by the Bugatti automated test harness. You can read files, run shell commands, edit code, and use any other available tools to carry out each step. Follow the harness protocol in the instructions appended below exactly — in particular, emit the required RESULT marker as the final line of every response.";
+
 /// Pi CLI provider adapter.
 ///
 /// Pi is invoked one turn at a time via `pi -p --mode json`. Conversation
 /// continuity across steps is preserved with a fixed `--session-id` plus a
 /// per-run `--session-dir`, so each turn resumes the same session that the
 /// previous turn created. The harness bootstrap (test instructions, extra
-/// system prompt) is passed on every turn via `--append-system-prompt-file`.
+/// system prompt) is passed on every turn via a compact base `--system-prompt`
+/// plus the bootstrap content appended inline with `--append-system-prompt`.
+///
+/// Why both flags: `pi` only reliably honors `--append-system-prompt` when an
+/// explicit base `--system-prompt` is also set. Appended onto pi's large
+/// default coding-assistant prompt, the harness RESULT-marker protocol gets
+/// buried and the model silently drops it (see issue #47). Supplying a small
+/// purpose-built base prompt keeps the appended protocol prominent. The
+/// bootstrap is also passed as its literal *content* (not a file path) so it
+/// works regardless of whether the installed `pi` build auto-reads path args.
 pub struct PiAdapter {
     /// Path to the `pi` CLI binary.
     binary_path: PathBuf,
@@ -27,7 +45,7 @@ pub struct PiAdapter {
     session_id: String,
     /// Whether verbose output is enabled.
     verbose: bool,
-    /// Bootstrap content passed as `--append-system-prompt-file` on each turn.
+    /// Bootstrap content passed inline via `--append-system-prompt` on each turn.
     bootstrap_content: Option<String>,
     /// Path to the persisted bootstrap prompt file (written lazily).
     bootstrap_path: Option<PathBuf>,
@@ -109,7 +127,10 @@ impl PiAdapter {
         prompt: &str,
     ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
     {
-        let bootstrap_path = self.ensure_bootstrap_file()?;
+        // Persist the bootstrap as an artifact for debugging. The return value
+        // is intentionally unused for launching: pi receives the bootstrap as
+        // inline content below, not as a path argument.
+        let _bootstrap_path = self.ensure_bootstrap_file()?;
 
         let mut cmd = Command::new(&self.binary_path);
         cmd.arg("--print")
@@ -120,8 +141,13 @@ impl PiAdapter {
             .arg("--session-dir")
             .arg(&self.session_dir);
 
-        if let Some(ref path) = bootstrap_path {
-            cmd.arg("--append-system-prompt").arg(path);
+        if let Some(ref content) = self.bootstrap_content {
+            // Set a compact base system prompt so the appended bootstrap (and
+            // its RESULT-marker protocol) is actually honored, then append the
+            // bootstrap *content* inline. See the type-level docs for the
+            // rationale (issue #47).
+            cmd.arg("--system-prompt").arg(PI_BASE_SYSTEM_PROMPT);
+            cmd.arg("--append-system-prompt").arg(content);
         }
 
         for arg in &self.agent_args {
@@ -227,7 +253,7 @@ impl AgentSession for PiAdapter {
         message: BootstrapMessage,
     ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
     {
-        // Store bootstrap content — it is passed as --append-system-prompt on
+        // Store bootstrap content — it is passed inline as --append-system-prompt on
         // every turn. No model call is made here.
         self.bootstrap_content = Some(message.content);
         Ok(Box::new(std::iter::once(Ok(OutputChunk::Done))))
@@ -432,6 +458,35 @@ exit 0
         script_path
     }
 
+    /// Write a fake `pi` binary that records its argv to `pi_args.txt` (one
+    /// base64-encoded argument per line, so arguments containing newlines stay
+    /// intact) before emitting a deterministic success stream.
+    fn write_arg_recording_pi(dir: &Path, args_out: &Path) -> PathBuf {
+        let script_path = dir.join("pi");
+        fs::write(
+            &script_path,
+            format!(
+                r#"#!/bin/sh
+: >"{out}"
+for a in "$@"; do
+  printf '%s' "$a" | base64 | tr -d '\n' >>"{out}"
+  printf '\n' >>"{out}"
+done
+cat >/dev/null
+printf '{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","delta":"RESULT OK"}}}}\n'
+printf '{{"type":"agent_end"}}\n'
+exit 0
+"#,
+                out = args_out.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+        script_path
+    }
+
     /// Write a fake `pi` binary that emits an error event.
     fn write_failing_pi(dir: &Path) -> PathBuf {
         let script_path = dir.join("pi");
@@ -558,6 +613,81 @@ exit 0
         assert_eq!(
             fs::read_to_string(&bootstrap_file).unwrap(),
             "system prompt content"
+        );
+    }
+
+    #[test]
+    fn bootstrap_passed_as_content_with_base_system_prompt() {
+        // Regression for issue #47: pi must receive the bootstrap *content*
+        // (carrying the RESULT-marker protocol) via --append-system-prompt,
+        // alongside an explicit base --system-prompt so the appended protocol
+        // is actually honored. Passing a file *path* (or appending onto pi's
+        // default prompt) silently drops the protocol.
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let args_out = tmp.path().join("pi_args.txt");
+        let mut adapter =
+            make_adapter(write_arg_recording_pi(tmp.path(), &args_out), artifact_dir);
+
+        let bootstrap = "## Result Contract\nEmit `RESULT OK` as the final line.";
+        adapter.bootstrap_content = Some(bootstrap.to_string());
+
+        let _ = collect_output(
+            adapter
+                .send_step(StepMessage {
+                    run_id: RunId("run-1".to_string()),
+                    session_id: SessionId("sess-1".to_string()),
+                    step_id: 0,
+                    total_steps: 1,
+                    source_file: "tests/x.test.toml".to_string(),
+                    instruction: "do it".to_string(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+
+        let recorded = fs::read_to_string(&args_out).unwrap();
+        let args: Vec<String> = recorded
+            .lines()
+            .map(|line| {
+                let decoded = std::process::Command::new("base64")
+                    .arg("-d")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| {
+                        use std::io::Write as _;
+                        child
+                            .stdin
+                            .take()
+                            .unwrap()
+                            .write_all(line.as_bytes())
+                            .unwrap();
+                        child.wait_with_output()
+                    })
+                    .unwrap();
+                String::from_utf8(decoded.stdout).unwrap()
+            })
+            .collect();
+        let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        // A base system prompt is supplied.
+        let sys_idx = args
+            .iter()
+            .position(|a| *a == "--system-prompt")
+            .expect("--system-prompt must be passed");
+        assert_eq!(args[sys_idx + 1], PI_BASE_SYSTEM_PROMPT);
+
+        // The bootstrap is appended as literal content, not a file path.
+        let append_idx = args
+            .iter()
+            .position(|a| *a == "--append-system-prompt")
+            .expect("--append-system-prompt must be passed");
+        assert_eq!(args[append_idx + 1], bootstrap);
+        assert!(
+            !args.iter().any(|a| a.ends_with("pi_bootstrap_prompt.txt")),
+            "bootstrap must be passed as content, not a file path: {args:?}"
         );
     }
 
