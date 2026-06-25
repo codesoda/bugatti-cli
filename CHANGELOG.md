@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-25
+
+### Removed
+
+- Internal `ralph` automation scripts (`scripts/ralph/`), which were development tooling not intended to ship with the CLI.
+
 ## [0.4.2] - 2026-04-20
 
 ### Added
