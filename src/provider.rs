@@ -119,8 +119,13 @@ pub fn initialize_session(
             artifact_dir,
             verbose,
         )?)),
+        "pi" => Ok(Box::new(crate::pi::PiAdapter::initialize(
+            config,
+            artifact_dir,
+            verbose,
+        )?)),
         other => Err(ProviderError::InitializationFailed(format!(
-            "unknown provider '{other}' (supported: claude-code, codex)"
+            "unknown provider '{other}' (supported: claude-code, codex, pi)"
         ))),
     }
 }

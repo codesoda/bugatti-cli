@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - New `codex` provider: set `name = "codex"` under `[provider]` to drive test runs with the OpenAI `codex` CLI. The adapter runs `codex exec --json` for the first turn and `codex exec resume <thread_id> --json` for subsequent steps, preserving conversation continuity across steps.
+- New `pi` provider: set `name = "pi"` under `[provider]` to drive test runs with the [`pi`](https://pi.dev) CLI. The adapter runs `pi --print --mode json` one turn per step, preserving conversation continuity via a per-run session id and session directory.
+
+### Fixed
+
+- Provider selection now honors the configured `[provider] name` for `codex` and `pi`. Previously `bugatti test` always initialized the `claude-code` adapter regardless of the configured provider.
 
 ### Removed
 
