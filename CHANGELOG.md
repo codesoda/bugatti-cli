@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0] - 2026-06-25
 
+### Added
+
+- New `codex` provider: set `name = "codex"` under `[provider]` to drive test runs with the OpenAI `codex` CLI. The adapter runs `codex exec --json` for the first turn and `codex exec resume <thread_id> --json` for subsequent steps, preserving conversation continuity across steps.
+
 ### Removed
 
 - Internal `ralph` automation scripts (`scripts/ralph/`), which were development tooling not intended to ship with the CLI.

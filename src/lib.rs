@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod cli;
+pub mod codex;
 pub mod command;
 pub mod config;
 pub mod diagnostics;
