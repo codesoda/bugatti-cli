@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-07
+
+### Fixed
+
+- `pi` provider: step completion is now detected as soon as the driving agent finishes its turn. pi 0.80.x keeps the `--print` subprocess alive after emitting the terminal `agent_end` event, and the adapter blocked waiting for that process to exit — so every step hung until `step_timeout_secs` and was recorded as `TIMEOUT`, making the provider unusable. The adapter now treats `agent_end` as authoritative: it gives the process a short grace period to exit, then kills and reaps it, and also cleans up a lingering subprocess if a step is abandoned mid-turn (timeout or Ctrl+C) (#48).
+
 ## [0.5.1] - 2026-06-25
 
 ### Fixed
@@ -98,7 +104,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs deploy workflow triggers and Node version
 - Result marker parser handling of embedded markers
 
-[Unreleased]: https://github.com/codesoda/bugatti-cli/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/codesoda/bugatti-cli/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/codesoda/bugatti-cli/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/codesoda/bugatti-cli/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/codesoda/bugatti-cli/compare/v0.4.2...v0.5.0
+[0.4.2]: https://github.com/codesoda/bugatti-cli/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/codesoda/bugatti-cli/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/codesoda/bugatti-cli/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/codesoda/bugatti-cli/compare/v0.3.0...v0.3.1
