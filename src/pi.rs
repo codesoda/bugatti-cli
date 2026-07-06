@@ -5,7 +5,8 @@ use crate::provider::{
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 /// Compact base system prompt for the driving `pi` agent.
 ///
@@ -288,6 +289,53 @@ struct PiTurnIterator {
     latest_error: Option<String>,
 }
 
+/// How long to let the pi subprocess exit on its own after the turn has
+/// logically completed, before force-killing it.
+const TURN_EXIT_GRACE: Duration = Duration::from_secs(2);
+
+impl PiTurnIterator {
+    /// Reap the turn subprocess after the turn has logically completed.
+    ///
+    /// pi 0.80.x keeps the `--print` process alive after emitting the terminal
+    /// `agent_end` event (issue #48), so a plain blocking `wait()` here hangs
+    /// until the step timeout fires. The turn is semantically finished once
+    /// `agent_end` arrives (the session transcript is already flushed), so
+    /// give the process a short grace period to exit cleanly, then kill it.
+    ///
+    /// Returns the exit status if the process exited on its own, or `None` if
+    /// it had to be killed.
+    fn reap_child(&mut self) -> Option<ExitStatus> {
+        let deadline = Instant::now() + TURN_EXIT_GRACE;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
+        tracing::debug!("pi turn process still alive after turn completion; killing it");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        None
+    }
+}
+
+impl Drop for PiTurnIterator {
+    fn drop(&mut self) {
+        // If the iterator is abandoned mid-turn (e.g. step timeout or Ctrl+C),
+        // make sure the pi subprocess doesn't linger.
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 impl Iterator for PiTurnIterator {
     type Item = Result<OutputChunk, ProviderError>;
 
@@ -300,26 +348,23 @@ impl Iterator for PiTurnIterator {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => {
-                    // EOF — the turn process has exited.
+                    // EOF — the turn's output stream is finished. The process
+                    // has usually exited, but don't block forever if it hasn't
+                    // (pi 0.80.x can keep running after closing stdout).
                     self.done = true;
 
-                    let status = match self.child.wait() {
-                        Ok(status) => status,
-                        Err(e) => {
-                            return Some(Err(ProviderError::ShutdownFailed(format!(
-                                "failed to wait for pi CLI: {e}"
-                            ))));
-                        }
-                    };
+                    let status = self.reap_child();
 
                     if let Some(message) = self.latest_error.take() {
                         return Some(Err(ProviderError::StreamError(message)));
                     }
 
-                    if !status.success() {
-                        return Some(Err(ProviderError::StreamError(format!(
-                            "pi command exited with status {status}"
-                        ))));
+                    if let Some(status) = status {
+                        if !status.success() {
+                            return Some(Err(ProviderError::StreamError(format!(
+                                "pi command exited with status {status}"
+                            ))));
+                        }
                     }
 
                     return Some(Ok(OutputChunk::Done));
@@ -386,11 +431,16 @@ impl Iterator for PiTurnIterator {
                             continue;
                         }
                         "agent_end" => {
+                            // Terminal event: the turn is complete. Do NOT
+                            // block on `wait()` here — pi 0.80.x keeps the
+                            // --print process alive after emitting agent_end,
+                            // which previously stalled every step until the
+                            // step timeout (issue #48).
                             self.done = true;
                             if let Some(message) = self.latest_error.take() {
                                 return Some(Err(ProviderError::StreamError(message)));
                             }
-                            let _ = self.child.wait();
+                            let _ = self.reap_child();
                             return Some(Ok(OutputChunk::Done));
                         }
                         _ => continue,
@@ -487,6 +537,27 @@ exit 0
         script_path
     }
 
+    /// Write a fake `pi` binary that emits `agent_end` but then never exits,
+    /// mimicking pi 0.80.x's lingering `--print` process (issue #48).
+    fn write_lingering_pi(dir: &Path) -> PathBuf {
+        let script_path = dir.join("pi");
+        fs::write(
+            &script_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"RESULT OK"}}\n'
+printf '{"type":"agent_end"}\n'
+# Simulate pi 0.80.x: the process stays alive after the turn completes.
+sleep 300
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+        script_path
+    }
+
     /// Write a fake `pi` binary that emits an error event.
     fn write_failing_pi(dir: &Path) -> PathBuf {
         let script_path = dir.join("pi");
@@ -558,6 +629,41 @@ exit 0
 
         assert_eq!(output, "RESULT: OK");
         assert_eq!(adapter.turn_index, 1);
+    }
+
+    #[test]
+    fn send_step_completes_when_pi_process_lingers_after_agent_end() {
+        // Regression test for issue #48: pi 0.80.x keeps the --print process
+        // alive after emitting agent_end. The adapter must still deliver Done
+        // promptly instead of blocking in wait() until the step timeout.
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let mut adapter = make_adapter(write_lingering_pi(tmp.path()), artifact_dir);
+
+        let start = Instant::now();
+        let output = collect_output(
+            adapter
+                .send_step(StepMessage {
+                    run_id: RunId("run-1".to_string()),
+                    session_id: SessionId("sess-1".to_string()),
+                    step_id: 0,
+                    total_steps: 1,
+                    source_file: "tests/login.test.toml".to_string(),
+                    instruction: "Verify the login form works".to_string(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(output, "RESULT OK");
+        // Grace period is 2s; anything close to the fake's 300s sleep means
+        // we blocked on the lingering process again.
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "send_step took {:?}, adapter blocked on lingering pi process",
+            start.elapsed()
+        );
     }
 
     #[test]
