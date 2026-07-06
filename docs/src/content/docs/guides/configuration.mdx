@@ -42,12 +42,28 @@ timeout_secs = 180
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `name` | `"claude-code"` | Provider to use |
+| `name` | `"claude-code"` | Provider to use: `"claude-code"`, `"codex"`, or `"pi"` |
 | `extra_system_prompt` | — | Additional context for the agent |
 | `agent_args` | `[]` | Extra CLI args passed to the provider |
 | `step_timeout_secs` | `300` | Default timeout per step (seconds) |
 | `strict_warnings` | `false` | Treat WARN results as failures |
 | `base_url` | — | Base URL for the app under test |
+
+### name
+
+Selects which agent CLI drives the test run. Three providers are supported:
+
+- `"claude-code"` (default) — drives the [`claude`](https://docs.claude.com/en/docs/claude-code) CLI.
+- `"codex"` — drives the [OpenAI `codex`](https://github.com/openai/codex) CLI.
+- `"pi"` — drives the [`pi`](https://pi.dev) CLI.
+
+The selected provider's binary must be installed and available on your `PATH`.
+
+```toml
+[provider]
+name = "pi"
+agent_args = ["--model", "anthropic/claude-sonnet-4-5"]
+```
 
 ### extra_system_prompt
 

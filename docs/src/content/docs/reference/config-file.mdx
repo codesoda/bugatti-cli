@@ -9,7 +9,7 @@ The config file is optional. If present, it must be named `bugatti.config.toml` 
 
 ```toml
 [provider]
-name = "claude-code"                    # Provider name (default: "claude-code")
+name = "claude-code"                    # Provider name: "claude-code", "codex", or "pi" (default: "claude-code")
 extra_system_prompt = "..."             # Additional context for the agent
 agent_args = ["--flag", "value"]        # Extra CLI args for the provider
 step_timeout_secs = 300                 # Default per-step timeout in seconds
@@ -35,7 +35,7 @@ timeout_secs = 120                      # Timeout for save/restore (default: 120
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `name` | string | `"claude-code"` | Provider to use |
+| `name` | string | `"claude-code"` | Provider to use: `"claude-code"`, `"codex"`, or `"pi"` |
 | `extra_system_prompt` | string | — | Additional system prompt for the agent |
 | `agent_args` | string[] | `[]` | Extra CLI args passed to the provider |
 | `step_timeout_secs` | integer | `300` | Default timeout per step (seconds) |

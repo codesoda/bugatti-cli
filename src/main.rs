@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use bugatti::claude_code::ClaudeCodeAdapter;
 use bugatti::cli::{Cli, Commands};
 use bugatti::command::{self, TrackedProcess};
 use bugatti::config;
@@ -16,7 +15,7 @@ use bugatti::exit_code::{
 };
 use bugatti::expand;
 use bugatti::output;
-use bugatti::provider::AgentSession;
+use bugatti::provider;
 use bugatti::report::{self, ReportInput};
 use bugatti::run::{self, ArtifactDir, EffectiveConfigSummary};
 use bugatti::test_file;
@@ -101,6 +100,7 @@ fn main() {
             strict_warnings,
             from_checkpoint,
             verbose,
+            config_path,
         } => {
             let project_root = std::env::current_dir().unwrap_or_else(|e| {
                 eprintln!("ERROR: failed to determine current directory: {e}");
@@ -110,6 +110,7 @@ fn main() {
             if !skip_cmds.is_empty() {
                 println!("Skipping commands: {}", skip_cmds.join(", "));
             }
+            let explicit_config = config_path.as_deref().map(PathBuf::from);
             match path {
                 Some(p) => {
                     let test_path = PathBuf::from(&p);
@@ -125,6 +126,7 @@ fn main() {
                             strict_warnings,
                             from_checkpoint.as_deref(),
                             verbose,
+                            explicit_config.as_deref(),
                         );
                         // Print run reference for single-file mode
                         if let Some(run_id) = &result.run_id {
@@ -148,6 +150,7 @@ fn main() {
                     strict_warnings,
                     from_checkpoint.as_deref(),
                     verbose,
+                    explicit_config.as_deref(),
                 ),
             }
         }
@@ -165,6 +168,7 @@ fn main() {
 ///
 /// Pipeline order: config load -> parse -> expand -> artifact setup -> command setup
 /// -> provider init -> step execution -> report -> teardown -> exit
+#[allow(clippy::too_many_arguments)]
 fn run_test_pipeline(
     project_root: &Path,
     test_path: &Path,
@@ -173,11 +177,16 @@ fn run_test_pipeline(
     strict_warnings: bool,
     from_checkpoint: Option<&str>,
     verbose: bool,
+    explicit_config: Option<&Path>,
 ) -> TestRunResult {
     let test_name_fallback = test_path.display().to_string();
 
     // Phase 1: Load config
-    let global_config = match config::load_config(project_root) {
+    let load_result = match explicit_config {
+        Some(path) => config::load_config_from_file(path),
+        None => config::load_config(project_root),
+    };
+    let global_config = match load_result {
         Ok(c) => c,
         Err(e) => {
             return TestRunResult {
@@ -483,7 +492,7 @@ fn run_test_with_artifacts(
 
     // Phase 10: Initialize provider session
     let mut session =
-        match ClaudeCodeAdapter::initialize(ctx.effective, &ctx.artifact_dir.root, ctx.verbose) {
+        match provider::initialize_session(ctx.effective, &ctx.artifact_dir.root, ctx.verbose) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e, "provider initialization failed");
@@ -532,7 +541,7 @@ fn run_test_with_artifacts(
         .step_timeout_secs
         .map(std::time::Duration::from_secs);
     let outcome = match executor::execute_steps(
-        &mut session,
+        session.as_mut(),
         &steps,
         ctx.run_id,
         ctx.session_id,
@@ -570,7 +579,11 @@ fn run_test_with_artifacts(
 
     // Phase 15: Write report
     let end_time = chrono::Utc::now();
-    let exit_code = exit_code::exit_code_for_run_strict(&outcome, ctx.strict_warnings);
+    let exit_code = exit_code::exit_code_for_run_or_interrupted(
+        &outcome,
+        ctx.strict_warnings,
+        is_interrupted(),
+    );
 
     let _ = ctx.write_report(&outcome, &end_time);
 
@@ -600,6 +613,7 @@ fn run_discovery(
     strict_warnings: bool,
     from_checkpoint: Option<&str>,
     verbose: bool,
+    explicit_config: Option<&Path>,
 ) -> i32 {
     println!("Discovering root test files...");
 
@@ -658,6 +672,7 @@ fn run_discovery(
             strict_warnings,
             from_checkpoint,
             verbose,
+            explicit_config,
         );
         results.push(result);
     }
@@ -684,6 +699,7 @@ fn run_discovery(
 }
 
 /// Run a single discovered test file through the full pipeline.
+#[allow(clippy::too_many_arguments)]
 fn run_single_test(
     test: &DiscoveredTest,
     project_root: &Path,
@@ -692,6 +708,7 @@ fn run_single_test(
     strict_warnings: bool,
     from_checkpoint: Option<&str>,
     verbose: bool,
+    explicit_config: Option<&Path>,
 ) -> TestRunResult {
     println!("═══════════════════════════════════════════════════════");
     println!("Running: {} ({})", test.name, relative_display(&test.path));
@@ -705,6 +722,7 @@ fn run_single_test(
         strict_warnings,
         from_checkpoint,
         verbose,
+        explicit_config,
     );
 
     if let Some(err) = &result.error {

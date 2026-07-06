@@ -91,6 +91,22 @@ pub fn exit_code_for_run_strict(outcome: &RunOutcome, strict_warnings: bool) -> 
     }
 }
 
+/// Compute the exit code for a run, accounting for interruption.
+///
+/// If the run was interrupted, returns EXIT_INTERRUPTED regardless of step outcomes.
+/// Otherwise delegates to `exit_code_for_run_strict`.
+pub fn exit_code_for_run_or_interrupted(
+    outcome: &RunOutcome,
+    strict_warnings: bool,
+    was_interrupted: bool,
+) -> i32 {
+    if was_interrupted {
+        EXIT_INTERRUPTED
+    } else {
+        exit_code_for_run_strict(outcome, strict_warnings)
+    }
+}
+
 /// Compute aggregate exit code from multiple run results.
 ///
 /// Returns the highest (most severe) exit code among all runs.
@@ -244,6 +260,36 @@ mod tests {
             StepResult::Verdict(StepVerdict::Warn("slow".to_string())),
         ]);
         assert_eq!(exit_code_for_run_strict(&outcome, false), EXIT_OK);
+    }
+
+    #[test]
+    fn exit_code_interrupted_overrides_passing() {
+        let outcome = make_outcome(vec![
+            StepResult::Verdict(StepVerdict::Ok),
+            StepResult::Verdict(StepVerdict::Ok),
+        ]);
+        assert_eq!(
+            exit_code_for_run_or_interrupted(&outcome, false, true),
+            EXIT_INTERRUPTED
+        );
+    }
+
+    #[test]
+    fn exit_code_not_interrupted_delegates_to_strict() {
+        let outcome = make_outcome(vec![
+            StepResult::Verdict(StepVerdict::Ok),
+            StepResult::Verdict(StepVerdict::Warn("slow".to_string())),
+        ]);
+        // Not interrupted, strict=false: warn is passing
+        assert_eq!(
+            exit_code_for_run_or_interrupted(&outcome, false, false),
+            EXIT_OK
+        );
+        // Not interrupted, strict=true: warn is failing
+        assert_eq!(
+            exit_code_for_run_or_interrupted(&outcome, true, false),
+            EXIT_STEP_ERROR
+        );
     }
 
     #[test]
