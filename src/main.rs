@@ -15,7 +15,7 @@ use bugatti::exit_code::{
 };
 use bugatti::expand;
 use bugatti::output;
-use bugatti::provider;
+use bugatti::provider::{self, ProviderError};
 use bugatti::report::{self, ReportInput};
 use bugatti::run::{self, ArtifactDir, EffectiveConfigSummary};
 use bugatti::test_file;
@@ -33,6 +33,36 @@ fn relative_display(path: &Path) -> String {
                 .map(|p| p.display().to_string())
         })
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Build a user-facing error for a missing test file.
+fn test_file_not_found_message(input: &str) -> String {
+    format!(
+        "ERROR: test file not found: {input}. Tip: run `bugatti test` to discover available tests."
+    )
+}
+
+/// Message shown when discovery finds no runnable root test files.
+fn no_root_tests_found_message() -> &'static str {
+    "No root test files found. Create a .test.toml file - see https://bugatti.dev/getting-started"
+}
+
+/// Build a provider-initialization error with actionable guidance for common setup misses.
+fn provider_initialization_error_message(err: &ProviderError) -> String {
+    match err {
+        ProviderError::InitializationFailed(inner) => {
+            if inner.contains("claude CLI binary not found in PATH")
+                && !inner.contains("Install Claude Code:")
+            {
+                format!(
+                    "provider initialization failed: {inner}. Install Claude Code: https://docs.anthropic.com/en/docs/claude-code"
+                )
+            } else {
+                err.to_string()
+            }
+        }
+        _ => err.to_string(),
+    }
 }
 
 /// Build shorthand test file candidate by appending `.test.toml`.
@@ -174,11 +204,14 @@ fn main() {
                     None => {
                         if let Some(shorthand) = shorthand_test_path(&p) {
                             eprintln!(
-                                "ERROR: test file not found: {p} (also tried {})",
-                                shorthand.display()
+                                "{}",
+                                test_file_not_found_message(&format!(
+                                    "{p} (also tried {})",
+                                    shorthand.display()
+                                ))
                             );
                         } else {
-                            eprintln!("ERROR: test file not found: {p}");
+                            eprintln!("{}", test_file_not_found_message(&p));
                         }
                         EXIT_CONFIG_ERROR
                     }
@@ -538,7 +571,7 @@ fn run_test_with_artifacts(
                 tracing::error!(error = %e, "provider initialization failed");
                 return ctx.fail_early(
                     EXIT_PROVIDER_ERROR,
-                    format!("provider initialization failed: {e}"),
+                    provider_initialization_error_message(&e),
                     &mut tracked_processes,
                 );
             }
@@ -672,7 +705,7 @@ fn run_discovery(
 
     if discovery.tests.is_empty() {
         if discovery.errors.is_empty() {
-            println!("No root test files found.");
+            println!("{}", no_root_tests_found_message());
             return EXIT_OK;
         } else {
             eprintln!(
@@ -853,8 +886,12 @@ mod tests {
     use std::path::PathBuf;
 
     use bugatti::cli::Cli;
+    use bugatti::provider::ProviderError;
 
-    use crate::{resolve_test_path, shorthand_test_path};
+    use crate::{
+        no_root_tests_found_message, provider_initialization_error_message, resolve_test_path,
+        shorthand_test_path, test_file_not_found_message,
+    };
 
     #[test]
     fn test_subcommand_no_path() {
@@ -1010,6 +1047,47 @@ mod tests {
             }
             Ok(_) => panic!("--help should produce an error-like result from clap"),
         }
+    }
+
+    #[test]
+    fn test_test_file_not_found_message_includes_tip() {
+        let msg = test_file_not_found_message("ftue");
+        assert!(msg.contains("test file not found: ftue"));
+        assert!(msg.contains("run `bugatti test` to discover available tests"));
+    }
+
+    #[test]
+    fn test_no_root_tests_found_message_includes_getting_started_link() {
+        let msg = no_root_tests_found_message();
+        assert!(msg.contains("No root test files found"));
+        assert!(msg.contains("https://bugatti.dev/getting-started"));
+    }
+
+    #[test]
+    fn test_provider_initialization_error_message_adds_claude_install_hint() {
+        let err = ProviderError::InitializationFailed(
+            "claude CLI binary not found in PATH: No such file or directory".to_string(),
+        );
+        let msg = provider_initialization_error_message(&err);
+        assert!(msg.contains("claude CLI binary not found in PATH"));
+        assert!(msg.contains("Install Claude Code: https://docs.anthropic.com/en/docs/claude-code"));
+    }
+
+    #[test]
+    fn test_provider_initialization_error_message_leaves_other_errors_unchanged() {
+        let err = ProviderError::InitializationFailed("some other init error".to_string());
+        let msg = provider_initialization_error_message(&err);
+        assert_eq!(msg, "provider initialization failed: some other init error");
+    }
+
+    #[test]
+    fn test_provider_initialization_error_message_does_not_duplicate_install_hint() {
+        let err = ProviderError::InitializationFailed(
+            "claude CLI binary not found in PATH: No such file or directory. Install Claude Code: https://docs.anthropic.com/en/docs/claude-code"
+                .to_string(),
+        );
+        let msg = provider_initialization_error_message(&err);
+        assert_eq!(msg, err.to_string());
     }
 
     #[test]
