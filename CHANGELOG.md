@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-07
+
+### Added
+
+- Shorthand test file names: `bugatti test ftue` now resolves to `ftue.test.toml` when the exact path doesn't exist. Exact paths still take precedence, and the not-found error reports both candidates tried (#37, #43)
+- Actionable error guidance for common failures: config read/parse errors, missing test files, empty test discovery, and provider initialization failures now include a concrete next step or docs link (#13, #44)
+
+### Changed
+
+- Colored output now respects the `NO_COLOR` environment variable and automatically disables ANSI escape codes when output is piped (not a TTY). Color decisions are made per stream (stdout/stderr), and the ANSI palette is centralized in a shared `output` module (#34)
+
 ## [0.5.2] - 2026-07-07
 
 ### Fixed
@@ -104,7 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs deploy workflow triggers and Node version
 - Result marker parser handling of embedded markers
 
-[Unreleased]: https://github.com/codesoda/bugatti-cli/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/codesoda/bugatti-cli/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/codesoda/bugatti-cli/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/codesoda/bugatti-cli/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/codesoda/bugatti-cli/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/codesoda/bugatti-cli/compare/v0.4.2...v0.5.0
