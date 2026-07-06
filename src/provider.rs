@@ -89,6 +89,47 @@ pub trait AgentSession {
     fn close(&mut self) -> Result<(), ProviderError>;
 }
 
+/// Format a step message with metadata prefix for sending to the provider.
+pub fn format_step_message(message: &StepMessage) -> String {
+    format!(
+        "[run_id={} session_id={} step={}/{} source={}]\n\n{}",
+        message.run_id,
+        message.session_id,
+        message.step_id + 1,
+        message.total_steps,
+        message.source_file,
+        message.instruction
+    )
+}
+
+/// Initialize the configured provider adapter for a test run.
+pub fn initialize_session(
+    config: &Config,
+    artifact_dir: &Path,
+    verbose: bool,
+) -> Result<Box<dyn AgentSession>, ProviderError> {
+    match config.provider.name.as_str() {
+        "claude-code" => Ok(Box::new(crate::claude_code::ClaudeCodeAdapter::initialize(
+            config,
+            artifact_dir,
+            verbose,
+        )?)),
+        "codex" => Ok(Box::new(crate::codex::CodexAdapter::initialize(
+            config,
+            artifact_dir,
+            verbose,
+        )?)),
+        "pi" => Ok(Box::new(crate::pi::PiAdapter::initialize(
+            config,
+            artifact_dir,
+            verbose,
+        )?)),
+        other => Err(ProviderError::InitializationFailed(format!(
+            "unknown provider '{other}' (supported: claude-code, codex, pi)"
+        ))),
+    }
+}
+
 /// Errors from provider operations.
 #[derive(Debug, Clone)]
 pub enum ProviderError {
@@ -132,3 +173,57 @@ impl std::fmt::Display for ProviderError {
 }
 
 impl std::error::Error for ProviderError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ProviderConfig;
+    use indexmap::IndexMap;
+
+    fn test_config(provider_name: &str) -> Config {
+        Config {
+            provider: ProviderConfig {
+                name: provider_name.to_string(),
+                extra_system_prompt: None,
+                agent_args: Vec::new(),
+                step_timeout_secs: None,
+                strict_warnings: None,
+                base_url: None,
+            },
+            commands: IndexMap::new(),
+            checkpoint: None,
+        }
+    }
+
+    #[test]
+    fn format_step_message_includes_metadata() {
+        let message = StepMessage {
+            run_id: RunId("run-123".to_string()),
+            session_id: SessionId("sess-456".to_string()),
+            step_id: 1,
+            total_steps: 3,
+            source_file: "tests/login.test.toml".to_string(),
+            instruction: "Verify the login form loads".to_string(),
+        };
+
+        let formatted = format_step_message(&message);
+
+        assert!(formatted.contains("run_id=run-123"));
+        assert!(formatted.contains("session_id=sess-456"));
+        assert!(formatted.contains("step=2/3"));
+        assert!(formatted.contains("source=tests/login.test.toml"));
+        assert!(formatted.contains("Verify the login form loads"));
+    }
+
+    #[test]
+    fn initialize_session_rejects_unknown_provider() {
+        let config = test_config("unknown");
+        let artifact_dir = tempfile::tempdir().unwrap();
+
+        let result = initialize_session(&config, artifact_dir.path(), false);
+
+        assert!(
+            matches!(result, Err(ProviderError::InitializationFailed(ref msg)) if msg.contains("unknown provider 'unknown'"))
+        );
+    }
+}

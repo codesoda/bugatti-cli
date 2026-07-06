@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod cli;
+pub mod codex;
 pub mod command;
 pub mod config;
 pub mod diagnostics;
@@ -7,6 +8,7 @@ pub mod discovery;
 pub mod executor;
 pub mod exit_code;
 pub mod expand;
+pub mod pi;
 pub mod provider;
 pub mod report;
 pub mod run;

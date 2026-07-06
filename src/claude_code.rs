@@ -390,62 +390,58 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
                                                     }
                                                 }
                                             }
-                                            "tool_use" => {
-                                                if self.verbose {
-                                                    let name =
-                                                        block.name.as_deref().unwrap_or("unknown");
-                                                    let input_preview = block
-                                                        .input
-                                                        .as_ref()
-                                                        .map(|v| {
-                                                            // For Bash, show the command directly
-                                                            if let Some(cmd) = v
-                                                                .get("command")
-                                                                .and_then(|c| c.as_str())
-                                                            {
-                                                                format!("$ {cmd}")
-                                                            } else if let Some(path) = v
-                                                                .get("file_path")
-                                                                .and_then(|p| p.as_str())
-                                                            {
-                                                                path.to_string()
-                                                            } else if let Some(pattern) = v
-                                                                .get("pattern")
-                                                                .and_then(|p| p.as_str())
-                                                            {
-                                                                format!("/{pattern}/")
-                                                            } else {
-                                                                v.to_string()
-                                                            }
-                                                        })
-                                                        .unwrap_or_default();
-                                                    let id_short = block
-                                                        .id
-                                                        .as_deref()
-                                                        .unwrap_or("")
-                                                        .chars()
-                                                        .take(12)
-                                                        .collect::<String>();
-                                                    eprintln!("{}[verbose]{} {}tool:{} {}{}{} {}{}{} {}({}){}", color::DIM, color::RESET, color::DIM, color::RESET, color::TOOL, name, color::RESET, color::LIGHT, input_preview, color::RESET, color::DIM, id_short, color::RESET);
-                                                }
+                                            "tool_use" if self.verbose => {
+                                                let name =
+                                                    block.name.as_deref().unwrap_or("unknown");
+                                                let input_preview = block
+                                                    .input
+                                                    .as_ref()
+                                                    .map(|v| {
+                                                        // For Bash, show the command directly
+                                                        if let Some(cmd) = v
+                                                            .get("command")
+                                                            .and_then(|c| c.as_str())
+                                                        {
+                                                            format!("$ {cmd}")
+                                                        } else if let Some(path) = v
+                                                            .get("file_path")
+                                                            .and_then(|p| p.as_str())
+                                                        {
+                                                            path.to_string()
+                                                        } else if let Some(pattern) = v
+                                                            .get("pattern")
+                                                            .and_then(|p| p.as_str())
+                                                        {
+                                                            format!("/{pattern}/")
+                                                        } else {
+                                                            v.to_string()
+                                                        }
+                                                    })
+                                                    .unwrap_or_default();
+                                                let id_short = block
+                                                    .id
+                                                    .as_deref()
+                                                    .unwrap_or("")
+                                                    .chars()
+                                                    .take(12)
+                                                    .collect::<String>();
+                                                eprintln!("{}[verbose]{} {}tool:{} {}{}{} {}{}{} {}({}){}", color::DIM, color::RESET, color::DIM, color::RESET, color::TOOL, name, color::RESET, color::LIGHT, input_preview, color::RESET, color::DIM, id_short, color::RESET);
                                             }
-                                            "thinking" => {
-                                                if self.verbose {
-                                                    if let Some(thinking) = &block.thinking {
-                                                        eprintln!(
-                                                            "{}[verbose]{} {}thinking:{}",
-                                                            color::DIM,
-                                                            color::RESET,
-                                                            color::DIM,
-                                                            color::RESET
-                                                        );
-                                                        eprintln!(
-                                                            "{}{}{}",
-                                                            color::THINKING,
-                                                            thinking,
-                                                            color::RESET
-                                                        );
-                                                    }
+                                            "thinking" if self.verbose => {
+                                                if let Some(thinking) = &block.thinking {
+                                                    eprintln!(
+                                                        "{}[verbose]{} {}thinking:{}",
+                                                        color::DIM,
+                                                        color::RESET,
+                                                        color::DIM,
+                                                        color::RESET
+                                                    );
+                                                    eprintln!(
+                                                        "{}{}{}",
+                                                        color::THINKING,
+                                                        thinking,
+                                                        color::RESET
+                                                    );
                                                 }
                                             }
                                             _ => {}
