@@ -121,7 +121,7 @@ readiness_timeout_secs = 120
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `name` | `"claude-code"` | Provider to use |
+| `name` | `"claude-code"` | Provider to use: `"claude-code"`, `"codex"`, or `"pi"` |
 | `extra_system_prompt` | — | Additional system prompt for the agent |
 | `agent_args` | `[]` | Extra CLI args passed to the provider |
 | `step_timeout_secs` | `300` | Default timeout per step (seconds) |

@@ -1,7 +1,7 @@
 use crate::test_file::ProviderOverrides;
 use indexmap::IndexMap;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Top-level project configuration loaded from bugatti.config.toml.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -148,6 +148,8 @@ pub enum ConfigError {
     ReadError(std::io::Error),
     /// Failed to parse the TOML content.
     ParseError(toml::de::Error),
+    /// An explicit --config path was provided but the file does not exist.
+    ExplicitPathNotFound(PathBuf),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -155,34 +157,69 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::ReadError(e) => write!(f, "failed to read bugatti.config.toml: {e}"),
             ConfigError::ParseError(e) => write!(f, "invalid bugatti.config.toml: {e}"),
+            ConfigError::ExplicitPathNotFound(p) => {
+                write!(f, "config file not found: {}", p.display())
+            }
         }
     }
 }
 
 impl std::error::Error for ConfigError {}
 
+/// Parse TOML contents into a `Config`, emitting trace logs for success/failure.
+fn parse_config_contents(path: &Path, contents: &str) -> Result<Config, ConfigError> {
+    let config: Config = toml::from_str(contents).map_err(|e| {
+        tracing::error!(path = %path.display(), error = %e, "config parse failed");
+        ConfigError::ParseError(e)
+    })?;
+    tracing::info!(
+        path = %path.display(),
+        provider = %config.provider.name,
+        commands = config.commands.len(),
+        "config loaded"
+    );
+    Ok(config)
+}
+
+/// Load configuration from an explicit file path.
+///
+/// Unlike [`load_config`], a missing file is an error — callers who pass
+/// `--config` want to fail loudly if the path is wrong rather than silently
+/// fall back to defaults.
+pub fn load_config_from_file(path: &Path) -> Result<Config, ConfigError> {
+    tracing::info!(path = %path.display(), "loading config from explicit path");
+    match std::fs::read_to_string(path) {
+        Ok(contents) => parse_config_contents(path, &contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::error!(path = %path.display(), "explicit config path not found");
+            Err(ConfigError::ExplicitPathNotFound(path.to_path_buf()))
+        }
+        Err(e) => {
+            tracing::error!(path = %path.display(), error = %e, "config read failed");
+            Err(ConfigError::ReadError(e))
+        }
+    }
+}
+
 /// Load configuration from `bugatti.config.toml` in the given directory.
 ///
-/// Returns `Ok(Config::default())` if the file does not exist.
+/// Returns `Ok(Config::default())` if the file does not exist, after printing
+/// a stderr warning so the fallback is visible in the terminal and run report
+/// instead of only in the diagnostics trace.
 /// Returns `Err` if the file exists but cannot be read or parsed.
 pub fn load_config(dir: &Path) -> Result<Config, ConfigError> {
     let path = dir.join("bugatti.config.toml");
     tracing::info!(path = %path.display(), "loading config");
     match std::fs::read_to_string(&path) {
-        Ok(contents) => {
-            let config: Config = toml::from_str(&contents).map_err(|e| {
-                tracing::error!(path = %path.display(), error = %e, "config parse failed");
-                ConfigError::ParseError(e)
-            })?;
-            tracing::info!(
-                provider = %config.provider.name,
-                commands = config.commands.len(),
-                "config loaded"
-            );
-            Ok(config)
-        }
+        Ok(contents) => parse_config_contents(&path, &contents),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::info!("no config file found, using defaults");
+            tracing::warn!(path = %path.display(), "no config file found, using defaults");
+            eprintln!(
+                "WARNING: no bugatti.config.toml found in {} — running with defaults.\n\
+                 Any [commands.*], agent_args, or extra_system_prompt defined elsewhere will not be applied.\n\
+                 Pass --config <path> to point at a config file explicitly.",
+                dir.display()
+            );
             Ok(Config::default())
         }
         Err(e) => {
@@ -288,6 +325,49 @@ cmd = "echo migrate"
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("invalid bugatti.config.toml"));
+    }
+
+    #[test]
+    fn load_from_explicit_path_reads_arbitrary_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom.toml");
+        fs::write(
+            &path,
+            r#"
+[provider]
+name = "openai"
+
+[commands.migrate]
+kind = "short_lived"
+cmd = "cargo sqlx migrate run"
+"#,
+        )
+        .unwrap();
+
+        let config = load_config_from_file(&path).unwrap();
+        assert_eq!(config.provider.name, "openai");
+        assert_eq!(config.commands.len(), 1);
+    }
+
+    #[test]
+    fn explicit_path_missing_is_hard_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.toml");
+        let err = load_config_from_file(&path).unwrap_err();
+        match err {
+            ConfigError::ExplicitPathNotFound(p) => assert_eq!(p, path),
+            other => panic!("expected ExplicitPathNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_path_invalid_toml_returns_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.toml");
+        fs::write(&path, "not valid toml [[[").unwrap();
+
+        let err = load_config_from_file(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::ParseError(_)));
     }
 
     #[test]
