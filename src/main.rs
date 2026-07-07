@@ -24,8 +24,16 @@ use bugatti::test_file;
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 /// Install a stderr tracing subscriber for CLI-level diagnostics.
+///
+/// Defaults to INFO and above; override with `RUST_LOG` (e.g.
+/// `RUST_LOG=debug` to see provider debug diagnostics).
 fn init_cli_tracing() {
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+        .from_env_lossy();
     let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
         .with_target(false)
         .without_time()
         .try_init();

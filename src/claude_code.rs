@@ -150,15 +150,27 @@ impl ClaudeCodeAdapter {
             .stderr(Stdio::piped());
 
         if self.verbose {
+            let c = output::stderr_colors();
             let args: Vec<_> = cmd
                 .as_std()
                 .get_args()
                 .map(|a| a.to_string_lossy().to_string())
                 .collect();
-            tracing::debug!(
-                binary = %cmd.as_std().get_program().to_string_lossy(),
-                args = %args.join(" "),
-                "claude launch"
+            eprintln!(
+                "{}[verbose]{} {}launch:{} {} {}{}",
+                c.dim,
+                c.reset,
+                c.dim,
+                c.reset,
+                c.cmd,
+                args.join(" "),
+                c.reset
+            );
+            eprintln!(
+                "{}         binary: {}{}",
+                c.dim,
+                cmd.as_std().get_program().to_string_lossy(),
+                c.reset
             );
         }
 
@@ -198,7 +210,17 @@ impl ClaudeCodeAdapter {
         let input_line = format_stream_input(message);
 
         if self.verbose {
-            tracing::debug!(bytes = message.len(), prompt = %message, "claude prompt");
+            let c = output::stderr_colors();
+            eprintln!(
+                "{}[verbose]{} {}prompt ({} bytes):{}",
+                c.dim,
+                c.reset,
+                c.dim,
+                message.len(),
+                c.reset
+            );
+            eprintln!("{}{}{}", c.prompt, message, c.reset);
+            eprintln!("{}───{}", c.sep, c.reset);
         }
 
         stdin
@@ -363,7 +385,7 @@ impl<'a> OutputStream for StreamTurnStream<'a> {
                                                     }
                                                 }
                                             }
-                                            "tool_use" if c.is_some() => {
+                                            "tool_use" if let Some(c) = c => {
                                                 let name =
                                                     block.name.as_deref().unwrap_or("unknown");
                                                 let input_preview = block
@@ -398,16 +420,33 @@ impl<'a> OutputStream for StreamTurnStream<'a> {
                                                     .chars()
                                                     .take(12)
                                                     .collect::<String>();
-                                                tracing::debug!(
-                                                    tool = %name,
-                                                    preview = %input_preview,
-                                                    id = %id_short,
-                                                    "claude tool"
+                                                eprintln!(
+                                                    "{}[verbose]{} {}tool:{} {}{}{} {}{}{} {}({}){}",
+                                                    c.dim,
+                                                    c.reset,
+                                                    c.dim,
+                                                    c.reset,
+                                                    c.tool,
+                                                    name,
+                                                    c.reset,
+                                                    c.light,
+                                                    input_preview,
+                                                    c.reset,
+                                                    c.dim,
+                                                    id_short,
+                                                    c.reset
                                                 );
                                             }
-                                            "thinking" if c.is_some() => {
+                                            "thinking" if let Some(c) = c => {
                                                 if let Some(thinking) = &block.thinking {
-                                                    tracing::debug!(thinking = %thinking, "claude thinking");
+                                                    eprintln!(
+                                                        "{}[verbose]{} {}thinking:{}",
+                                                        c.dim, c.reset, c.dim, c.reset
+                                                    );
+                                                    eprintln!(
+                                                        "{}{}{}",
+                                                        c.thinking, thinking, c.reset
+                                                    );
                                                 }
                                             }
                                             _ => {}
@@ -418,7 +457,7 @@ impl<'a> OutputStream for StreamTurnStream<'a> {
                             }
                             "user" => {
                                 // Tool results — log in verbose mode
-                                if c.is_some() {
+                                if let Some(c) = c {
                                     if let Some(msg) = &event.message {
                                         for block in &msg.content {
                                             if block.block_type == "tool_result" {
@@ -438,11 +477,17 @@ impl<'a> OutputStream for StreamTurnStream<'a> {
                                                     .chars()
                                                     .take(12)
                                                     .collect::<String>();
-                                                tracing::debug!(
-                                                    id = %id_short,
-                                                    result = %result_text,
-                                                    "claude result"
+                                                eprintln!(
+                                                    "{}[verbose]{} {}result:{} {}({}){}",
+                                                    c.dim,
+                                                    c.reset,
+                                                    c.dim,
+                                                    c.reset,
+                                                    c.dim,
+                                                    id_short,
+                                                    c.reset
                                                 );
+                                                eprintln!("{}{}{}", c.result, result_text, c.reset);
                                             }
                                         }
                                     }
