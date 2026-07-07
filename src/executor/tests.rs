@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::Config;
 use crate::provider::{AgentSession, BootstrapMessage, OutputChunk, ProviderError, StepMessage};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // --- Result marker parsing tests ---
 
