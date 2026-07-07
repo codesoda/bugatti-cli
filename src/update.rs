@@ -28,6 +28,146 @@ const BINARY_NAME: &str = "bugatti";
 /// Minimum interval between passive version checks.
 const CHECK_INTERVAL: Duration = Duration::from_secs(8 * 3600);
 
+/// Error type for update and self-replace operations.
+#[derive(Debug, thiserror::Error)]
+pub enum UpdateError {
+    #[error("invalid {which} version '{version}': {source}")]
+    InvalidVersion {
+        which: &'static str,
+        version: String,
+        #[source]
+        source: semver::Error,
+    },
+    #[error("failed to build HTTP client: {source}")]
+    HttpClientBuild {
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("failed to connect to release server: {source}")]
+    ReleaseRequest {
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("release server returned HTTP {status} — expected a redirect")]
+    UnexpectedRedirectStatus { status: reqwest::StatusCode },
+    #[error("redirect response missing Location header")]
+    MissingLocationHeader,
+    #[error("Location header is not valid UTF-8")]
+    InvalidLocationHeader,
+    #[error("could not extract version tag from redirect URL: {location}")]
+    InvalidRedirectLocation { location: String },
+    #[error("failed to download HTTP client: {source}")]
+    DownloadClientBuild {
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("failed to download '{filename}': {source}")]
+    DownloadRequest {
+        filename: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("download of '{filename}' failed: HTTP {status} from {url}")]
+    DownloadStatus {
+        filename: String,
+        status: reqwest::StatusCode,
+        url: String,
+    },
+    #[error("failed to read response for '{filename}': {source}")]
+    DownloadRead {
+        filename: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("failed to write '{filename}': {source}")]
+    DownloadWrite {
+        filename: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("malformed checksum line {line} (expected '<hash>  <filename>'): {line_text}")]
+    MalformedChecksumLine { line: usize, line_text: String },
+    #[error("invalid SHA256 hash on line {line} (expected 64 hex chars): '{hash}'")]
+    InvalidChecksumHash { line: usize, hash: String },
+    #[error("empty filename on checksum line {line}")]
+    EmptyChecksumFilename { line: usize },
+    #[error("checksums file is empty")]
+    EmptyChecksums,
+    #[error("failed to open for checksum: {source}")]
+    ChecksumOpen {
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to read for checksum: {source}")]
+    ChecksumRead {
+        #[source]
+        source: io::Error,
+    },
+    #[error("checksum entry not found for '{artifact_name}'. Available: [{available}]")]
+    MissingChecksumEntry {
+        artifact_name: String,
+        available: String,
+    },
+    #[error("checksum verification failed for '{artifact_name}':\n  expected: {expected}\n  actual:   {actual}\nThe downloaded file may be corrupted. Aborting update.")]
+    ChecksumMismatch {
+        artifact_name: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("failed to open archive: {source}")]
+    ArchiveOpen {
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to read tar entries: {source}")]
+    ArchiveEntries {
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to read tar entry: {source}")]
+    ArchiveEntry {
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to read entry path: {source}")]
+    ArchiveEntryPath {
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to extract '{binary_name}': {source}")]
+    ExtractBinary {
+        binary_name: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("archive does not contain '{binary_name}' binary: {archive_path}")]
+    MissingBinary {
+        binary_name: &'static str,
+        archive_path: String,
+    },
+    #[error("failed to replace the running binary (permissions issue?): {source}\nReplacement file: {replacement_path}")]
+    SelfReplace {
+        replacement_path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to create temp directory: {source}")]
+    TempDir {
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to create extraction directory: {source}")]
+    CreateExtractionDir {
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to set executable permissions: {source}")]
+    SetPermissions {
+        #[source]
+        source: io::Error,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Version helpers
 // ---------------------------------------------------------------------------
@@ -49,11 +189,21 @@ fn normalize_version_tag(tag: &str) -> &str {
 /// Compares two version strings using semver.
 ///
 /// Returns `Ordering::Less` if `local < remote` (update available).
-fn compare_versions(local: &str, remote: &str) -> Result<Ordering, String> {
-    let local_ver = semver::Version::parse(normalize_version_tag(local))
-        .map_err(|e| format!("invalid local version '{local}': {e}"))?;
-    let remote_ver = semver::Version::parse(normalize_version_tag(remote))
-        .map_err(|e| format!("invalid remote version '{remote}': {e}"))?;
+fn compare_versions(local: &str, remote: &str) -> Result<Ordering, UpdateError> {
+    let local_ver = semver::Version::parse(normalize_version_tag(local)).map_err(|source| {
+        UpdateError::InvalidVersion {
+            which: "local",
+            version: local.to_string(),
+            source,
+        }
+    })?;
+    let remote_ver = semver::Version::parse(normalize_version_tag(remote)).map_err(|source| {
+        UpdateError::InvalidVersion {
+            which: "remote",
+            version: remote.to_string(),
+            source,
+        }
+    })?;
     Ok(local_ver.cmp(&remote_ver))
 }
 
@@ -73,40 +223,40 @@ struct ReleaseMetadata {
 /// Sends a GET to the releases/latest URL with redirect following disabled.
 /// GitHub returns a 302 with `Location: .../releases/tag/v0.4.1` — we extract
 /// the tag from that header. One request, unlimited rate, no API token.
-async fn discover_latest_tag(url: &str, timeout: Duration) -> Result<String, String> {
+async fn discover_latest_tag(url: &str, timeout: Duration) -> Result<String, UpdateError> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        .map_err(|source| UpdateError::HttpClientBuild { source })?;
 
     let response = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("failed to connect to release server: {e}"))?;
+        .map_err(|source| UpdateError::ReleaseRequest { source })?;
 
     let status = response.status();
     if !status.is_redirection() {
-        return Err(format!(
-            "release server returned HTTP {status} — expected a redirect"
-        ));
+        return Err(UpdateError::UnexpectedRedirectStatus { status });
     }
 
     let location = response
         .headers()
         .get(reqwest::header::LOCATION)
-        .ok_or("redirect response missing Location header")?
+        .ok_or(UpdateError::MissingLocationHeader)?
         .to_str()
-        .map_err(|_| "Location header is not valid UTF-8")?;
+        .map_err(|_| UpdateError::InvalidLocationHeader)?;
 
     location
         .rsplit('/')
         .next()
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .ok_or_else(|| format!("could not extract version tag from redirect URL: {location}"))
+        .ok_or_else(|| UpdateError::InvalidRedirectLocation {
+            location: location.to_string(),
+        })
 }
 
 /// Builds release metadata from a discovered tag.
@@ -136,7 +286,10 @@ fn repo_base_from_url(url: &str) -> &str {
 }
 
 /// Fetches release metadata from the given URL.
-async fn check_latest_version(url: &str, timeout: Duration) -> Result<ReleaseMetadata, String> {
+async fn check_latest_version(
+    url: &str,
+    timeout: Duration,
+) -> Result<ReleaseMetadata, UpdateError> {
     let tag = discover_latest_tag(url, timeout).await?;
     let repo_base = repo_base_from_url(url);
     Ok(build_release_metadata(&tag, repo_base))
@@ -147,35 +300,50 @@ async fn check_latest_version(url: &str, timeout: Duration) -> Result<ReleaseMet
 // ---------------------------------------------------------------------------
 
 /// Downloads a URL to a file in the given directory.
-async fn download_to_file(url: &str, dest_dir: &Path, filename: &str) -> Result<PathBuf, String> {
+async fn download_to_file(
+    url: &str,
+    dest_dir: &Path,
+    filename: &str,
+) -> Result<PathBuf, UpdateError> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(120))
         .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        .map_err(|source| UpdateError::DownloadClientBuild { source })?;
 
     let response = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("failed to download '{filename}': {e}"))?;
+        .map_err(|source| UpdateError::DownloadRequest {
+            filename: filename.to_string(),
+            source,
+        })?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(format!(
-            "download of '{filename}' failed: HTTP {status} from {url}"
-        ));
+        return Err(UpdateError::DownloadStatus {
+            filename: filename.to_string(),
+            status,
+            url: url.to_string(),
+        });
     }
 
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| format!("failed to read response for '{filename}': {e}"))?;
+        .map_err(|source| UpdateError::DownloadRead {
+            filename: filename.to_string(),
+            source,
+        })?;
 
     let dest_path = dest_dir.join(filename);
     tokio::fs::write(&dest_path, &bytes)
         .await
-        .map_err(|e| format!("failed to write '{filename}': {e}"))?;
+        .map_err(|source| UpdateError::DownloadWrite {
+            filename: filename.to_string(),
+            source,
+        })?;
 
     Ok(dest_path)
 }
@@ -187,7 +355,7 @@ async fn download_to_file(url: &str, dest_dir: &Path, filename: &str) -> Result<
 /// Parses a GNU coreutils-format checksums file into a map of filename → hex hash.
 ///
 /// Expected format: `<64-hex-chars>  <filename>` (two spaces).
-fn parse_checksums(content: &str) -> Result<HashMap<String, String>, String> {
+fn parse_checksums(content: &str) -> Result<HashMap<String, String>, UpdateError> {
     let mut map = HashMap::new();
     for (i, line) in content.lines().enumerate() {
         let line = line.trim_end_matches('\r');
@@ -195,40 +363,40 @@ fn parse_checksums(content: &str) -> Result<HashMap<String, String>, String> {
             continue;
         }
         let Some((hash, filename)) = line.split_once("  ") else {
-            return Err(format!(
-                "malformed checksum line {} (expected '<hash>  <filename>'): {line}",
-                i + 1
-            ));
+            return Err(UpdateError::MalformedChecksumLine {
+                line: i + 1,
+                line_text: line.to_string(),
+            });
         };
         let hash = hash.trim();
         let filename = filename.trim();
         if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(format!(
-                "invalid SHA256 hash on line {} (expected 64 hex chars): '{hash}'",
-                i + 1
-            ));
+            return Err(UpdateError::InvalidChecksumHash {
+                line: i + 1,
+                hash: hash.to_string(),
+            });
         }
         if filename.is_empty() {
-            return Err(format!("empty filename on checksum line {}", i + 1));
+            return Err(UpdateError::EmptyChecksumFilename { line: i + 1 });
         }
         map.insert(filename.to_string(), hash.to_lowercase());
     }
     if map.is_empty() {
-        return Err("checksums file is empty".to_string());
+        return Err(UpdateError::EmptyChecksums);
     }
     Ok(map)
 }
 
 /// Computes the SHA256 digest of a file.
-fn sha256_file(path: &Path) -> Result<String, String> {
+fn sha256_file(path: &Path) -> Result<String, UpdateError> {
     let mut file =
-        std::fs::File::open(path).map_err(|e| format!("failed to open for checksum: {e}"))?;
+        std::fs::File::open(path).map_err(|source| UpdateError::ChecksumOpen { source })?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
     loop {
         let n = file
             .read(&mut buf)
-            .map_err(|e| format!("failed to read for checksum: {e}"))?;
+            .map_err(|source| UpdateError::ChecksumRead { source })?;
         if n == 0 {
             break;
         }
@@ -242,19 +410,21 @@ fn verify_checksum(
     checksums: &HashMap<String, String>,
     artifact_name: &str,
     artifact_path: &Path,
-) -> Result<(), String> {
-    let expected = checksums.get(artifact_name).ok_or_else(|| {
-        format!(
-            "checksum entry not found for '{artifact_name}'. Available: [{}]",
-            checksums.keys().cloned().collect::<Vec<_>>().join(", ")
-        )
-    })?;
+) -> Result<(), UpdateError> {
+    let expected =
+        checksums
+            .get(artifact_name)
+            .ok_or_else(|| UpdateError::MissingChecksumEntry {
+                artifact_name: artifact_name.to_string(),
+                available: checksums.keys().cloned().collect::<Vec<_>>().join(", "),
+            })?;
     let actual = sha256_file(artifact_path)?;
     if actual != *expected {
-        return Err(format!(
-            "checksum verification failed for '{artifact_name}':\n  expected: {expected}\n  actual:   {actual}\n\
-             The downloaded file may be corrupted. Aborting update."
-        ));
+        return Err(UpdateError::ChecksumMismatch {
+            artifact_name: artifact_name.to_string(),
+            expected: expected.clone(),
+            actual,
+        });
     }
     Ok(())
 }
@@ -267,20 +437,20 @@ fn verify_checksum(
 ///
 /// Searches for `bugatti` at any nesting depth (the release archive contains
 /// `bugatti-{tag}-{target}/bugatti`).
-fn extract_binary(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+fn extract_binary(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf, UpdateError> {
     let file =
-        std::fs::File::open(archive_path).map_err(|e| format!("failed to open archive: {e}"))?;
+        std::fs::File::open(archive_path).map_err(|source| UpdateError::ArchiveOpen { source })?;
     let decoder = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
 
     for entry_result in archive
         .entries()
-        .map_err(|e| format!("failed to read tar entries: {e}"))?
+        .map_err(|source| UpdateError::ArchiveEntries { source })?
     {
-        let mut entry = entry_result.map_err(|e| format!("failed to read tar entry: {e}"))?;
+        let mut entry = entry_result.map_err(|source| UpdateError::ArchiveEntry { source })?;
         let entry_path = entry
             .path()
-            .map_err(|e| format!("failed to read entry path: {e}"))?;
+            .map_err(|source| UpdateError::ArchiveEntryPath { source })?;
 
         let file_name = entry_path
             .file_name()
@@ -291,15 +461,18 @@ fn extract_binary(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf, Strin
             let dest = dest_dir.join(BINARY_NAME);
             entry
                 .unpack(&dest)
-                .map_err(|e| format!("failed to extract '{BINARY_NAME}': {e}"))?;
+                .map_err(|source| UpdateError::ExtractBinary {
+                    binary_name: BINARY_NAME,
+                    source,
+                })?;
             return Ok(dest);
         }
     }
 
-    Err(format!(
-        "archive does not contain '{BINARY_NAME}' binary: {}",
-        archive_path.display()
-    ))
+    Err(UpdateError::MissingBinary {
+        binary_name: BINARY_NAME,
+        archive_path: archive_path.display().to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -329,13 +502,10 @@ fn secure_binary(_path: &Path) {}
 // ---------------------------------------------------------------------------
 
 /// Replaces the currently running binary with the file at `replacement_path`.
-fn self_replace_binary(replacement_path: &Path) -> Result<(), String> {
-    self_replace::self_replace(replacement_path).map_err(|e| {
-        format!(
-            "failed to replace the running binary (permissions issue?): {e}\n\
-             Replacement file: {}",
-            replacement_path.display()
-        )
+fn self_replace_binary(replacement_path: &Path) -> Result<(), UpdateError> {
+    self_replace::self_replace(replacement_path).map_err(|source| UpdateError::SelfReplace {
+        replacement_path: replacement_path.display().to_string(),
+        source,
     })
 }
 
@@ -363,7 +533,7 @@ fn confirm_update(local: &str, remote: &str) -> bool {
 ///
 /// If `check` is true, only prints whether an update is available.
 /// Otherwise, downloads, verifies, extracts, and replaces the running binary.
-pub async fn run_update(check: bool, yes: bool) -> Result<(), String> {
+pub async fn run_update(check: bool, yes: bool) -> Result<(), UpdateError> {
     if check {
         return run_update_check().await;
     }
@@ -371,13 +541,13 @@ pub async fn run_update(check: bool, yes: bool) -> Result<(), String> {
 }
 
 /// Check-only: prints whether an update is available.
-async fn run_update_check() -> Result<(), String> {
+async fn run_update_check() -> Result<(), UpdateError> {
     let local = current_version();
 
     let release = match check_latest_version(GITHUB_RELEASES_LATEST_URL, REQUEST_TIMEOUT).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Warning: unable to check for updates: {e}");
+            tracing::warn!(error = %e, "unable to check for updates");
             return Ok(());
         }
     };
@@ -393,7 +563,7 @@ async fn run_update_check() -> Result<(), String> {
             println!("bugatti v{local} is up to date");
         }
         Err(e) => {
-            eprintln!("Warning: unable to compare versions: {e}");
+            tracing::warn!(error = %e, "unable to compare versions");
         }
     }
 
@@ -401,19 +571,16 @@ async fn run_update_check() -> Result<(), String> {
 }
 
 /// Full install: download, verify, extract, secure, replace.
-async fn run_update_install(yes: bool) -> Result<(), String> {
+async fn run_update_install(yes: bool) -> Result<(), UpdateError> {
     let local = current_version();
 
     // Step 1: Fetch release metadata
-    let release = check_latest_version(GITHUB_RELEASES_LATEST_URL, REQUEST_TIMEOUT)
-        .await
-        .map_err(|e| format!("failed to check for latest release: {e}"))?;
+    let release = check_latest_version(GITHUB_RELEASES_LATEST_URL, REQUEST_TIMEOUT).await?;
 
     let remote = normalize_version_tag(&release.tag);
 
     // Step 2: Compare versions
-    let ordering =
-        compare_versions(local, &release.tag).map_err(|e| format!("version comparison: {e}"))?;
+    let ordering = compare_versions(local, &release.tag)?;
 
     if ordering != Ordering::Less {
         println!("bugatti v{local} is already up to date (latest: v{remote})");
@@ -427,28 +594,24 @@ async fn run_update_install(yes: bool) -> Result<(), String> {
     }
 
     // Step 4: Download to temp directory
-    let tmp_dir =
-        tempfile::tempdir().map_err(|e| format!("failed to create temp directory: {e}"))?;
+    let tmp_dir = tempfile::tempdir().map_err(|source| UpdateError::TempDir { source })?;
 
     println!("Downloading bugatti v{remote}...");
 
     let checksums_path =
-        download_to_file(&release.checksums_url, tmp_dir.path(), CHECKSUMS_FILENAME)
-            .await
-            .map_err(|e| format!("failed to download checksums: {e}"))?;
+        download_to_file(&release.checksums_url, tmp_dir.path(), CHECKSUMS_FILENAME).await?;
 
     let artifact_name = release
         .artifact_url
         .rsplit('/')
         .next()
         .unwrap_or("artifact.tar.gz");
-    let artifact_path = download_to_file(&release.artifact_url, tmp_dir.path(), artifact_name)
-        .await
-        .map_err(|e| format!("failed to download release: {e}"))?;
+    let artifact_path =
+        download_to_file(&release.artifact_url, tmp_dir.path(), artifact_name).await?;
 
     // Step 5: Verify checksum
     let checksums_content = std::fs::read_to_string(&checksums_path)
-        .map_err(|e| format!("failed to read checksums file: {e}"))?;
+        .map_err(|source| UpdateError::ChecksumRead { source })?;
     let checksums = parse_checksums(&checksums_content)?;
     verify_checksum(&checksums, artifact_name, &artifact_path)?;
 
@@ -457,7 +620,7 @@ async fn run_update_install(yes: bool) -> Result<(), String> {
     // Step 6: Extract binary
     let extract_dir = tmp_dir.path().join("extracted");
     std::fs::create_dir_all(&extract_dir)
-        .map_err(|e| format!("failed to create extraction directory: {e}"))?;
+        .map_err(|source| UpdateError::CreateExtractionDir { source })?;
     let new_binary = extract_binary(&artifact_path, &extract_dir)?;
 
     // Step 7: Set executable permissions
@@ -466,7 +629,7 @@ async fn run_update_install(yes: bool) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
         std::fs::set_permissions(&new_binary, perms)
-            .map_err(|e| format!("failed to set executable permissions: {e}"))?;
+            .map_err(|source| UpdateError::SetPermissions { source })?;
     }
 
     // Step 8: macOS binary security (quarantine removal + adhoc codesign)
@@ -565,7 +728,7 @@ async fn passive_version_check() {
     if let Ok(Ordering::Less) = compare_versions(local, &release.tag) {
         let remote = normalize_version_tag(&release.tag);
         let msg = format_update_notification(local, remote);
-        eprintln!("{msg}");
+        tracing::info!(message = %msg);
     }
 }
 

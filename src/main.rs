@@ -23,6 +23,22 @@ use bugatti::test_file;
 /// Global flag set by the Ctrl+C handler.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+/// Install a stderr tracing subscriber for CLI-level diagnostics.
+///
+/// Defaults to INFO and above; override with `RUST_LOG` (e.g.
+/// `RUST_LOG=debug` to see provider debug diagnostics).
+fn init_cli_tracing() {
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+        .from_env_lossy();
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
+        .try_init();
+}
+
 /// Display a path relative to the current directory, falling back to absolute.
 fn relative_display(path: &Path) -> String {
     std::env::current_dir()
@@ -122,6 +138,8 @@ struct TestRunResult {
 
 #[tokio::main]
 async fn main() {
+    init_cli_tracing();
+
     // Install Ctrl+C handler for graceful interruption.
     // The handler sets a flag; the run loop checks it between steps.
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -153,7 +171,7 @@ async fn main() {
         Commands::Update { check, yes } => match bugatti::update::run_update(check, yes).await {
             Ok(()) => EXIT_OK,
             Err(e) => {
-                eprintln!("ERROR: {e}");
+                tracing::error!(error = %e, "update command failed");
                 EXIT_CONFIG_ERROR
             }
         },
@@ -167,7 +185,7 @@ async fn main() {
             config_path,
         } => {
             let project_root = std::env::current_dir().unwrap_or_else(|e| {
-                eprintln!("ERROR: failed to determine current directory: {e}");
+                tracing::error!(error = %e, "failed to determine current directory");
                 std::process::exit(EXIT_CONFIG_ERROR);
             });
 
@@ -306,7 +324,7 @@ async fn run_test_pipeline(
             exit_code: EXIT_CONFIG_ERROR,
             run_id: None,
             report_path: None,
-            error: Some(msg),
+            error: Some(msg.to_string()),
         };
     }
 
@@ -318,7 +336,7 @@ async fn run_test_pipeline(
             exit_code: EXIT_CONFIG_ERROR,
             run_id: None,
             report_path: None,
-            error: Some(msg),
+            error: Some(msg.to_string()),
         };
     }
 
@@ -448,7 +466,6 @@ impl<'a> PipelineContext<'a> {
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to write report");
-                eprintln!("WARNING: failed to write report: {e}");
                 Err(e)
             }
         }
@@ -465,7 +482,7 @@ async fn run_test_with_artifacts(
     let _tracing_guard = match diagnostics::init_tracing(ctx.artifact_dir) {
         Ok(g) => Some(g),
         Err(e) => {
-            eprintln!("WARNING: failed to initialize tracing: {e}");
+            tracing::warn!(error = %e, "failed to initialize tracing");
             None
         }
     };
@@ -718,14 +735,14 @@ async fn run_discovery(
     let discovery = match discover_root_tests(project_root) {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("ERROR: {e}");
+            tracing::error!(error = %e, "discover root tests failed");
             return EXIT_CONFIG_ERROR;
         }
     };
 
     // Report per-file parse errors before starting any runs
     for err in &discovery.errors {
-        eprintln!("PARSE ERROR: {err}");
+        tracing::error!(error = %err, "parse error");
     }
 
     if discovery.tests.is_empty() {
@@ -826,7 +843,7 @@ async fn run_single_test(
     .await;
 
     if let Some(err) = &result.error {
-        eprintln!("  ERROR: {err}");
+        tracing::error!(error = %err, "test failed before execution");
     }
     println!();
 

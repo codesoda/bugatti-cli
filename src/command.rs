@@ -76,9 +76,18 @@ impl std::fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
+/// Error type for skip-command validation.
+#[derive(Debug, thiserror::Error)]
+pub enum ValidationError {
+    #[error("unknown command(s) in --skip-cmd: {unknown}. Known commands: {known}")]
+    UnknownSkipCmds { unknown: String, known: String },
+    #[error("invalid --skip-readiness: {0}")]
+    InvalidSkipReadiness(String),
+}
+
 /// Validate that all skip-cmd names refer to known command names in the config.
-/// Returns an error message listing invalid names if any are unknown.
-pub fn validate_skip_cmds(config: &Config, skip_cmds: &[String]) -> Result<(), String> {
+/// Returns a typed error listing invalid names if any are unknown.
+pub fn validate_skip_cmds(config: &Config, skip_cmds: &[String]) -> Result<(), ValidationError> {
     let unknown: Vec<&String> = skip_cmds
         .iter()
         .filter(|name| !config.commands.contains_key(name.as_str()))
@@ -88,19 +97,18 @@ pub fn validate_skip_cmds(config: &Config, skip_cmds: &[String]) -> Result<(), S
         Ok(())
     } else {
         let known: Vec<&String> = config.commands.keys().collect();
-        Err(format!(
-            "unknown command(s) in --skip-cmd: {}. Known commands: {}",
-            unknown
+        Err(ValidationError::UnknownSkipCmds {
+            unknown: unknown
                 .iter()
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
-            known
+            known: known
                 .iter()
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
-        ))
+        })
     }
 }
 
@@ -109,7 +117,7 @@ pub fn validate_skip_readiness(
     config: &Config,
     skip_cmds: &[String],
     skip_readiness: &[String],
-) -> Result<(), String> {
+) -> Result<(), ValidationError> {
     let mut errors = Vec::new();
     for name in skip_readiness {
         if !config.commands.contains_key(name.as_str()) {
@@ -121,7 +129,7 @@ pub fn validate_skip_readiness(
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!("invalid --skip-readiness: {}", errors.join("; ")))
+        Err(ValidationError::InvalidSkipReadiness(errors.join("; ")))
     }
 }
 
@@ -884,7 +892,9 @@ mod tests {
     fn validate_skip_cmds_invalid_names() {
         let config = make_config(vec![("migrate", CommandKind::ShortLived, "echo migrate")]);
 
-        let err = validate_skip_cmds(&config, &["nonexistent".to_string()]).unwrap_err();
+        let err = validate_skip_cmds(&config, &["nonexistent".to_string()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("nonexistent"), "error: {err}");
         assert!(
             err.contains("migrate"),
@@ -899,8 +909,9 @@ mod tests {
             ("server", CommandKind::LongLived, "sleep 60"),
         ]);
 
-        let err =
-            validate_skip_cmds(&config, &["migrate".to_string(), "bogus".to_string()]).unwrap_err();
+        let err = validate_skip_cmds(&config, &["migrate".to_string(), "bogus".to_string()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("bogus"), "error: {err}");
         assert!(
             !err.contains("migrate") || err.contains("Known commands"),
@@ -921,7 +932,9 @@ mod tests {
     #[test]
     fn validate_skip_readiness_must_be_skipped() {
         let config = make_config(vec![("server", CommandKind::LongLived, "sleep 60")]);
-        let err = validate_skip_readiness(&config, &[], &["server".to_string()]).unwrap_err();
+        let err = validate_skip_readiness(&config, &[], &["server".to_string()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not in --skip-cmd"), "error: {err}");
     }
 
@@ -929,7 +942,8 @@ mod tests {
     fn validate_skip_readiness_unknown_command() {
         let config = make_config(vec![("server", CommandKind::LongLived, "sleep 60")]);
         let err = validate_skip_readiness(&config, &["server".to_string()], &["bogus".to_string()])
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not a known command"), "error: {err}");
     }
 
