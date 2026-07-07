@@ -146,7 +146,7 @@ async fn main() {
     {
         let interrupted = interrupted.clone();
         let _ = ctrlc::set_handler(move || {
-            tracing::warn!("Interrupted (Ctrl+C). Attempting best-effort cleanup...");
+            eprintln!("\nInterrupted (Ctrl+C). Attempting best-effort cleanup...");
             interrupted.store(true, Ordering::Relaxed);
             INTERRUPTED.store(true, Ordering::Relaxed);
         });
@@ -223,18 +223,15 @@ async fn main() {
                     }
                     None => {
                         if let Some(shorthand) = shorthand_test_path(&p) {
-                            tracing::error!(
-                                message = %test_file_not_found_message(&format!(
+                            eprintln!(
+                                "{}",
+                                test_file_not_found_message(&format!(
                                     "{p} (also tried {})",
                                     shorthand.display()
-                                )),
-                                "test file not found"
+                                ))
                             );
                         } else {
-                            tracing::error!(
-                                message = %test_file_not_found_message(&p),
-                                "test file not found"
-                            );
+                            eprintln!("{}", test_file_not_found_message(&p));
                         }
                         EXIT_CONFIG_ERROR
                     }
@@ -753,9 +750,9 @@ async fn run_discovery(
             println!("{}", no_root_tests_found_message());
             return EXIT_OK;
         } else {
-            tracing::error!(
-                parse_error_count = discovery.errors.len(),
-                "no runnable test files found"
+            eprintln!(
+                "No runnable test files found ({} had parse errors).",
+                discovery.errors.len()
             );
             return EXIT_CONFIG_ERROR;
         }
