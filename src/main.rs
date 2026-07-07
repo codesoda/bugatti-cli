@@ -23,6 +23,14 @@ use bugatti::test_file;
 /// Global flag set by the Ctrl+C handler.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+/// Install a stderr tracing subscriber for CLI-level diagnostics.
+fn init_cli_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_target(false)
+        .without_time()
+        .try_init();
+}
+
 /// Display a path relative to the current directory, falling back to absolute.
 fn relative_display(path: &Path) -> String {
     std::env::current_dir()
@@ -122,6 +130,8 @@ struct TestRunResult {
 
 #[tokio::main]
 async fn main() {
+    init_cli_tracing();
+
     // Install Ctrl+C handler for graceful interruption.
     // The handler sets a flag; the run loop checks it between steps.
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -153,7 +163,7 @@ async fn main() {
         Commands::Update { check, yes } => match bugatti::update::run_update(check, yes).await {
             Ok(()) => EXIT_OK,
             Err(e) => {
-                eprintln!("ERROR: {e}");
+                tracing::error!(error = %e, "update command failed");
                 EXIT_CONFIG_ERROR
             }
         },
@@ -448,7 +458,6 @@ impl<'a> PipelineContext<'a> {
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to write report");
-                eprintln!("WARNING: failed to write report: {e}");
                 Err(e)
             }
         }
@@ -465,7 +474,7 @@ async fn run_test_with_artifacts(
     let _tracing_guard = match diagnostics::init_tracing(ctx.artifact_dir) {
         Ok(g) => Some(g),
         Err(e) => {
-            eprintln!("WARNING: failed to initialize tracing: {e}");
+            tracing::warn!(error = %e, "failed to initialize tracing");
             None
         }
     };

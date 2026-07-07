@@ -28,6 +28,11 @@ pub fn init_tracing(artifact_dir: &ArtifactDir) -> Result<TracingGuard, TracingE
 
     let file_writer = FileWriter(std::sync::Mutex::new(file));
 
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_timer(tracing_subscriber::fmt::time::uptime())
+        .with_level(true);
+
     let json_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_writer(file_writer)
@@ -35,7 +40,9 @@ pub fn init_tracing(artifact_dir: &ArtifactDir) -> Result<TracingGuard, TracingE
         .with_timer(tracing_subscriber::fmt::time::uptime())
         .with_level(true);
 
-    let subscriber = tracing_subscriber::registry().with(json_layer);
+    let subscriber = tracing_subscriber::registry()
+        .with(stderr_layer)
+        .with(json_layer);
 
     let guard = subscriber.set_default();
 
