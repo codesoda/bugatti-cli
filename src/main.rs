@@ -15,7 +15,7 @@ use bugatti::exit_code::{
 };
 use bugatti::expand;
 use bugatti::output;
-use bugatti::provider::{self, ProviderError};
+use bugatti::provider::{self, AgentSession, ProviderError};
 use bugatti::report::{self, ReportInput};
 use bugatti::run::{self, ArtifactDir, EffectiveConfigSummary};
 use bugatti::test_file;
@@ -205,6 +205,7 @@ async fn main() {
                             from_checkpoint.as_deref(),
                             verbose,
                             explicit_config.as_deref(),
+                            &provider::initialize_session,
                         )
                         .await;
                         // Print run reference for single-file mode
@@ -245,6 +246,7 @@ async fn main() {
                         from_checkpoint.as_deref(),
                         verbose,
                         explicit_config.as_deref(),
+                        &provider::initialize_session,
                     )
                     .await
                 }
@@ -265,7 +267,7 @@ async fn main() {
 /// Pipeline order: config load -> parse -> expand -> artifact setup -> command setup
 /// -> provider init -> step execution -> report -> teardown -> exit
 #[allow(clippy::too_many_arguments)]
-async fn run_test_pipeline(
+async fn run_test_pipeline<F>(
     project_root: &Path,
     test_path: &Path,
     skip_cmds: &[String],
@@ -274,7 +276,11 @@ async fn run_test_pipeline(
     from_checkpoint: Option<&str>,
     verbose: bool,
     explicit_config: Option<&Path>,
-) -> TestRunResult {
+    session_factory: &F,
+) -> TestRunResult
+where
+    F: Fn(&config::Config, &Path, bool) -> Result<Box<dyn AgentSession>, ProviderError>,
+{
     let test_name_fallback = test_path.display().to_string();
 
     // Phase 1: Load config
@@ -392,7 +398,7 @@ async fn run_test_pipeline(
         start_time: chrono::Utc::now(),
         verbose,
     };
-    run_test_with_artifacts(&ctx, steps).await
+    run_test_with_artifacts(&ctx, steps, session_factory).await
 }
 
 /// State shared across the pipeline after artifact setup.
@@ -474,10 +480,14 @@ impl<'a> PipelineContext<'a> {
 
 /// Continue the pipeline after artifact setup. Ensures best-effort report writing
 /// and subprocess teardown even on failure.
-async fn run_test_with_artifacts(
+async fn run_test_with_artifacts<F>(
     ctx: &PipelineContext<'_>,
     mut steps: Vec<bugatti::expand::ExpandedStep>,
-) -> TestRunResult {
+    session_factory: &F,
+) -> TestRunResult
+where
+    F: Fn(&config::Config, &Path, bool) -> Result<Box<dyn AgentSession>, ProviderError>,
+{
     // Phase 7: Initialize tracing
     let _tracing_guard = match diagnostics::init_tracing(ctx.artifact_dir) {
         Ok(g) => Some(g),
@@ -596,20 +606,19 @@ async fn run_test_with_artifacts(
     };
 
     // Phase 10: Initialize provider session
-    let mut session =
-        match provider::initialize_session(ctx.effective, &ctx.artifact_dir.root, ctx.verbose) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "provider initialization failed");
-                return ctx
-                    .fail_early(
-                        EXIT_PROVIDER_ERROR,
-                        provider_initialization_error_message(&e),
-                        &mut tracked_processes,
-                    )
-                    .await;
-            }
-        };
+    let mut session = match session_factory(ctx.effective, &ctx.artifact_dir.root, ctx.verbose) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "provider initialization failed");
+            return ctx
+                .fail_early(
+                    EXIT_PROVIDER_ERROR,
+                    provider_initialization_error_message(&e),
+                    &mut tracked_processes,
+                )
+                .await;
+        }
+    };
 
     if let Err(e) = session.start().await {
         tracing::error!(error = %e, "provider start failed");
@@ -721,7 +730,8 @@ async fn run_test_with_artifacts(
 
 /// Discover and run all root test files, printing an aggregate summary.
 /// Returns the aggregate exit code.
-async fn run_discovery(
+#[allow(clippy::too_many_arguments)]
+async fn run_discovery<F>(
     project_root: &Path,
     skip_cmds: &[String],
     skip_readiness: &[String],
@@ -729,7 +739,11 @@ async fn run_discovery(
     from_checkpoint: Option<&str>,
     verbose: bool,
     explicit_config: Option<&Path>,
-) -> i32 {
+    session_factory: &F,
+) -> i32
+where
+    F: Fn(&config::Config, &Path, bool) -> Result<Box<dyn AgentSession>, ProviderError>,
+{
     println!("Discovering root test files...");
 
     let discovery = match discover_root_tests(project_root) {
@@ -788,6 +802,7 @@ async fn run_discovery(
             from_checkpoint,
             verbose,
             explicit_config,
+            session_factory,
         )
         .await;
         results.push(result);
@@ -816,7 +831,7 @@ async fn run_discovery(
 
 /// Run a single discovered test file through the full pipeline.
 #[allow(clippy::too_many_arguments)]
-async fn run_single_test(
+async fn run_single_test<F>(
     test: &DiscoveredTest,
     project_root: &Path,
     skip_cmds: &[String],
@@ -825,7 +840,11 @@ async fn run_single_test(
     from_checkpoint: Option<&str>,
     verbose: bool,
     explicit_config: Option<&Path>,
-) -> TestRunResult {
+    session_factory: &F,
+) -> TestRunResult
+where
+    F: Fn(&config::Config, &Path, bool) -> Result<Box<dyn AgentSession>, ProviderError>,
+{
     println!("═══════════════════════════════════════════════════════");
     println!("Running: {} ({})", test.name, relative_display(&test.path));
     println!("═══════════════════════════════════════════════════════");
@@ -839,6 +858,7 @@ async fn run_single_test(
         from_checkpoint,
         verbose,
         explicit_config,
+        session_factory,
     )
     .await;
 
@@ -926,15 +946,22 @@ fn print_run_references(results: &[TestRunResult]) {
 
 #[cfg(test)]
 mod tests {
+    #[allow(dead_code)]
+    mod common {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/mod.rs"));
+    }
+
     use clap::Parser;
     use std::path::PathBuf;
 
     use bugatti::cli::Cli;
+    use bugatti::exit_code::{EXIT_OK, EXIT_PROVIDER_ERROR, EXIT_STEP_ERROR};
+    use bugatti::provider::OutputChunk;
     use bugatti::provider::ProviderError;
 
     use crate::{
         no_root_tests_found_message, provider_initialization_error_message, resolve_test_path,
-        shorthand_test_path, test_file_not_found_message,
+        run_discovery, run_test_pipeline, shorthand_test_path, test_file_not_found_message,
     };
 
     #[test]
@@ -1181,5 +1208,170 @@ mod tests {
 
         let resolved = resolve_test_path(direct_dir.to_string_lossy().as_ref());
         assert!(resolved.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_test_pipeline_happy_path_writes_report() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+        let test_path = project_root.join("happy.test.toml");
+        std::fs::write(
+            &test_path,
+            r#"
+name = "happy"
+
+[[steps]]
+instruction = "First step"
+
+[[steps]]
+instruction = "Second step"
+"#,
+        )
+        .expect("write test file");
+
+        let session_factory = |_config: &bugatti::config::Config,
+                               _artifact_dir: &std::path::Path,
+                               _verbose: bool|
+         -> Result<
+            Box<dyn bugatti::provider::AgentSession>,
+            ProviderError,
+        > { Ok(Box::new(common::MockSession::with_ok_responses(2))) };
+
+        let result = run_test_pipeline(
+            project_root,
+            &test_path,
+            &[],
+            &[],
+            false,
+            None,
+            false,
+            None,
+            &session_factory,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, EXIT_OK);
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
+        let report_path = std::path::Path::new(result.report_path.as_ref().unwrap());
+        assert!(report_path.is_file(), "missing report: {report_path:?}");
+        let report = std::fs::read_to_string(report_path).expect("read report");
+        assert!(report.contains("happy"));
+    }
+
+    #[tokio::test]
+    async fn run_test_pipeline_reports_session_init_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+        let test_path = project_root.join("broken.test.toml");
+        std::fs::write(
+            &test_path,
+            r#"
+name = "broken"
+
+[[steps]]
+instruction = "This step never runs"
+"#,
+        )
+        .expect("write test file");
+
+        let session_factory =
+            |_config: &bugatti::config::Config,
+             _artifact_dir: &std::path::Path,
+             _verbose: bool|
+             -> Result<Box<dyn bugatti::provider::AgentSession>, ProviderError> {
+                Err(ProviderError::InitializationFailed("boom".to_string()))
+            };
+
+        let result = run_test_pipeline(
+            project_root,
+            &test_path,
+            &[],
+            &[],
+            false,
+            None,
+            false,
+            None,
+            &session_factory,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, EXIT_PROVIDER_ERROR);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("provider initialization failed"));
+        let report_path = std::path::Path::new(result.report_path.as_ref().unwrap());
+        assert!(report_path.is_file(), "missing report: {report_path:?}");
+    }
+
+    #[tokio::test]
+    async fn run_discovery_aggregates_pass_and_fail() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+
+        std::fs::write(
+            project_root.join("pass.test.toml"),
+            r#"
+name = "pass"
+
+[[steps]]
+instruction = "Passes"
+"#,
+        )
+        .expect("write pass test");
+
+        std::fs::write(
+            project_root.join("fail.test.toml"),
+            r#"
+name = "fail"
+
+[overrides.provider]
+extra_system_prompt = "fail"
+
+[[steps]]
+instruction = "Fails"
+"#,
+        )
+        .expect("write fail test");
+
+        let session_factory =
+            |config: &bugatti::config::Config,
+             _artifact_dir: &std::path::Path,
+             _verbose: bool|
+             -> Result<Box<dyn bugatti::provider::AgentSession>, ProviderError> {
+                if config.provider.extra_system_prompt.as_deref() == Some("fail") {
+                    let responses = vec![vec![
+                        Ok(OutputChunk::Text(
+                            "RESULT ERROR: simulated failure\n".to_string(),
+                        )),
+                        Ok(OutputChunk::Done),
+                    ]];
+                    Ok(Box::new(common::MockSession::new(responses)))
+                } else {
+                    Ok(Box::new(common::MockSession::with_ok_responses(1)))
+                }
+            };
+
+        let exit_code = run_discovery(
+            project_root,
+            &[],
+            &[],
+            false,
+            None,
+            false,
+            None,
+            &session_factory,
+        )
+        .await;
+
+        assert_eq!(exit_code, EXIT_STEP_ERROR);
+        let runs_dir = project_root.join(".bugatti").join("runs");
+        let run_count = std::fs::read_dir(&runs_dir).expect("runs dir").count();
+        assert_eq!(run_count, 2, "expected one run per discovered test");
     }
 }

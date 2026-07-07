@@ -591,9 +591,13 @@ async fn teardown_single(process: &mut TrackedProcess) -> TeardownResult {
 
 #[cfg(test)]
 mod tests {
+    #[allow(dead_code)]
+    mod common {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/mod.rs"));
+    }
+
     use super::*;
     use crate::config::{CommandDef, CommandKind, Config, ProviderConfig};
-    use crate::run::{ArtifactDir, RunId};
     use indexmap::IndexMap;
 
     fn make_config(commands: Vec<(&str, CommandKind, &str)>) -> Config {
@@ -630,10 +634,8 @@ mod tests {
 
     #[tokio::test]
     async fn successful_short_lived_command() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         let config = make_config(vec![("echo_test", CommandKind::ShortLived, "echo hello")]);
 
@@ -654,10 +656,8 @@ mod tests {
 
     #[tokio::test]
     async fn failed_short_lived_command() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         let config = make_config(vec![("fail_cmd", CommandKind::ShortLived, "exit 42")]);
 
@@ -677,10 +677,8 @@ mod tests {
 
     #[tokio::test]
     async fn output_capture_to_log_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         let config = make_config(vec![(
             "mixed_output",
@@ -702,10 +700,8 @@ mod tests {
 
     #[tokio::test]
     async fn long_lived_commands_are_skipped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         let config = make_config(vec![
             ("setup", CommandKind::ShortLived, "echo setup"),
@@ -722,10 +718,8 @@ mod tests {
 
     #[tokio::test]
     async fn skip_cmd_flag_excludes_command() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         let config = make_config(vec![
             ("migrate", CommandKind::ShortLived, "echo migrate"),
@@ -741,10 +735,8 @@ mod tests {
 
     #[tokio::test]
     async fn failed_command_stops_execution() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         // Insertion ordering: "a_first" was inserted before "b_second"
         let config = make_config(vec![
@@ -771,10 +763,8 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_long_lived_captures_output() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         // Use a command that writes output then sleeps briefly
         let config = make_config(vec![(
@@ -806,10 +796,8 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_long_lived_skip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         let config = make_config(vec![
             ("server", CommandKind::LongLived, "sleep 60"),
@@ -828,10 +816,8 @@ mod tests {
 
     #[tokio::test]
     async fn teardown_stops_running_processes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         let config = make_config(vec![("sleeper", CommandKind::LongLived, "sleep 600")]);
 
@@ -851,10 +837,8 @@ mod tests {
 
     #[tokio::test]
     async fn detect_unexpected_exit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         // Command that exits immediately
         let config = make_config(vec![("quick_exit", CommandKind::LongLived, "exit 1")]);
@@ -949,10 +933,8 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_long_lived_skip_readiness() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         // Readiness URL points to unreachable host — would fail without skip_readiness
         let config = make_config_with_readiness(vec![(
@@ -978,10 +960,8 @@ mod tests {
 
     #[tokio::test]
     async fn short_lived_not_spawned_as_long_lived() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         let config = make_config(vec![
             ("setup", CommandKind::ShortLived, "echo setup"),
@@ -1000,10 +980,8 @@ mod tests {
 
     #[tokio::test]
     async fn commands_execute_in_declaration_order() {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
 
         // Insert in reverse-alpha order: z_last first, a_first second.
         // With BTreeMap this would have executed a_first then z_last.

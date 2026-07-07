@@ -1,3 +1,5 @@
+extern crate self as bugatti;
+
 pub mod claude_code;
 pub mod cli;
 pub mod codex;

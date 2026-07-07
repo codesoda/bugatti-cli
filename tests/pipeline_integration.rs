@@ -3,93 +3,22 @@
 //! These tests verify that all components are wired correctly by exercising
 //! the pipeline with test fixtures and a mock provider.
 
-use std::path::Path;
 use std::time::Duration;
 
 use bugatti::command;
-use bugatti::config::{self, Config};
+use bugatti::config;
 use bugatti::diagnostics;
 use bugatti::executor::{self, RunOutcome, StepOutcome, StepResult, StepVerdict};
 use bugatti::exit_code;
 use bugatti::expand;
-use bugatti::provider::{
-    AgentSession, BootstrapMessage, OutputChunk, OutputStream, ProviderError, StepMessage,
-    VecOutputStream,
-};
+use bugatti::provider::{AgentSession, OutputChunk};
 use bugatti::report::{self, ReportInput};
 use bugatti::run::{self, EffectiveConfigSummary};
 use bugatti::test_file;
 
-/// A mock provider that returns pre-configured responses.
-struct MockProvider {
-    responses: Vec<Vec<Result<OutputChunk, ProviderError>>>,
-    call_count: usize,
-}
-
-impl MockProvider {
-    fn with_ok_responses(count: usize) -> Self {
-        let mut responses = Vec::new();
-        for _ in 0..count {
-            responses.push(vec![
-                Ok(OutputChunk::Text(
-                    "Executing step...\nRESULT OK\n".to_string(),
-                )),
-                Ok(OutputChunk::Done),
-            ]);
-        }
-        Self {
-            responses,
-            call_count: 0,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl AgentSession for MockProvider {
-    fn initialize(
-        _config: &Config,
-        _artifact_dir: &Path,
-        _verbose: bool,
-    ) -> Result<Self, ProviderError>
-    where
-        Self: Sized,
-    {
-        Ok(Self::with_ok_responses(0))
-    }
-
-    async fn start(&mut self) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    async fn send_bootstrap(
-        &mut self,
-        _message: BootstrapMessage,
-    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
-        Ok(Box::new(VecOutputStream::new(vec![
-            Ok(OutputChunk::Text("Bootstrap acknowledged.\n".to_string())),
-            Ok(OutputChunk::Done),
-        ])))
-    }
-
-    async fn send_step(
-        &mut self,
-        _message: StepMessage,
-    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
-        if self.call_count < self.responses.len() {
-            let idx = self.call_count;
-            self.call_count += 1;
-            Ok(Box::new(VecOutputStream::new(self.responses[idx].clone())))
-        } else {
-            Ok(Box::new(VecOutputStream::new(vec![
-                Ok(OutputChunk::Text("RESULT OK\n".to_string())),
-                Ok(OutputChunk::Done),
-            ])))
-        }
-    }
-
-    async fn close(&mut self) -> Result<(), ProviderError> {
-        Ok(())
-    }
+#[allow(dead_code)]
+mod common {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/mod.rs"));
 }
 
 /// Test the full pipeline with a mock provider: config -> parse -> expand ->
@@ -149,7 +78,7 @@ instruction = "Verify the login form is present"
     // Phase 8-9: Skip command setup (no commands configured)
 
     // Phase 10: Mock provider
-    let mut session = MockProvider::with_ok_responses(2);
+    let mut session = common::MockSession::with_ok_responses(2);
     session.start().await.unwrap();
 
     // Phase 11: Execute steps
@@ -286,15 +215,12 @@ instruction = "This step will fail"
     let _guard = diagnostics::init_tracing(&artifact_dir).unwrap();
 
     // Mock provider that returns ERROR
-    let mut session = MockProvider {
-        responses: vec![vec![
-            Ok(OutputChunk::Text(
-                "Something went wrong\nRESULT ERROR: database connection failed\n".to_string(),
-            )),
-            Ok(OutputChunk::Done),
-        ]],
-        call_count: 0,
-    };
+    let mut session = common::MockSession::new(vec![vec![
+        Ok(OutputChunk::Text(
+            "Something went wrong\nRESULT ERROR: database connection failed\n".to_string(),
+        )),
+        Ok(OutputChunk::Done),
+    ]]);
     session.start().await.unwrap();
 
     let outcome = executor::execute_steps(
