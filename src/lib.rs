@@ -10,6 +10,7 @@ pub mod exit_code;
 pub mod expand;
 pub mod output;
 pub mod pi;
+pub mod progress;
 pub mod provider;
 pub mod report;
 pub mod run;

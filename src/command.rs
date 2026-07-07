@@ -1,4 +1,5 @@
 use crate::config::{CommandDef, CommandKind, Config};
+use crate::progress::{ProgressReporter, STDOUT_PROGRESS_REPORTER};
 use crate::run::ArtifactDir;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -145,6 +146,21 @@ pub async fn run_short_lived_commands(
     artifact_dir: &ArtifactDir,
     skip_cmds: &[String],
 ) -> Result<Vec<CommandResult>, CommandError> {
+    run_short_lived_commands_with_reporter(
+        config,
+        artifact_dir,
+        skip_cmds,
+        &STDOUT_PROGRESS_REPORTER,
+    )
+    .await
+}
+
+pub(crate) async fn run_short_lived_commands_with_reporter(
+    config: &Config,
+    artifact_dir: &ArtifactDir,
+    skip_cmds: &[String],
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<CommandResult>, CommandError> {
     let mut results = Vec::new();
 
     for (name, def) in &config.commands {
@@ -152,15 +168,15 @@ pub async fn run_short_lived_commands(
             continue;
         }
         if skip_cmds.contains(name) {
-            println!("SKIP ....... {name}");
+            reporter.line(&format!("SKIP ....... {name}"));
             continue;
         }
 
-        let result = execute_short_lived(name, def, &artifact_dir.logs).await?;
-        println!(
+        let result = execute_short_lived(name, def, &artifact_dir.logs, reporter).await?;
+        reporter.line(&format!(
             "OK ......... {name} (exit {})",
             result.exit_code.unwrap_or(-1)
-        );
+        ));
         results.push(result);
     }
 
@@ -172,9 +188,10 @@ async fn execute_short_lived(
     name: &str,
     def: &CommandDef,
     logs_dir: &Path,
+    reporter: &dyn ProgressReporter,
 ) -> Result<CommandResult, CommandError> {
     tracing::info!(command = name, cmd = %def.cmd, "executing short-lived command");
-    println!("RUN ........ {name}: {}", def.cmd);
+    reporter.line(&format!("RUN ........ {name}: {}", def.cmd));
 
     let output = Command::new("sh")
         .arg("-c")
@@ -204,8 +221,8 @@ async fn execute_short_lived(
     if !output.status.success() {
         tracing::error!(command = name, exit_code = ?exit_code, "short-lived command failed");
         // Print last lines of output so the user can see what went wrong
-        print_output_tail("stderr", &output.stderr);
-        print_output_tail("stdout", &output.stdout);
+        print_output_tail(reporter, "stderr", &output.stderr);
+        print_output_tail(reporter, "stdout", &output.stdout);
         return Err(CommandError::NonZeroExit {
             name: name.to_string(),
             exit_code,
@@ -223,7 +240,7 @@ async fn execute_short_lived(
 }
 
 /// Print the last non-empty lines of command output, prefixed with a label.
-fn print_output_tail(label: &str, output: &[u8]) {
+fn print_output_tail(reporter: &dyn ProgressReporter, label: &str, output: &[u8]) {
     let text = String::from_utf8_lossy(output);
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.is_empty() {
@@ -237,9 +254,9 @@ fn print_output_tail(label: &str, output: &[u8]) {
         .into_iter()
         .rev()
         .collect();
-    println!("  {label}:");
+    reporter.line(&format!("  {label}:"));
     for line in tail {
-        println!("    {line}");
+        reporter.line(&format!("    {line}"));
     }
 }
 
@@ -260,6 +277,23 @@ pub async fn run_checkpoint_command(
     checkpoint_id: &str,
     project_root: &Path,
     timeout_secs: Option<u64>,
+) -> Result<(), String> {
+    run_checkpoint_command_with_reporter(
+        cmd,
+        checkpoint_id,
+        project_root,
+        timeout_secs,
+        &STDOUT_PROGRESS_REPORTER,
+    )
+    .await
+}
+
+pub(crate) async fn run_checkpoint_command_with_reporter(
+    cmd: &str,
+    checkpoint_id: &str,
+    project_root: &Path,
+    timeout_secs: Option<u64>,
+    reporter: &dyn ProgressReporter,
 ) -> Result<(), String> {
     let cp_path = checkpoint_path(project_root, checkpoint_id);
     std::fs::create_dir_all(&cp_path).map_err(|e| {
@@ -288,8 +322,8 @@ pub async fn run_checkpoint_command(
     match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => {
             if !output.status.success() {
-                print_output_tail("stderr", &output.stderr);
-                print_output_tail("stdout", &output.stdout);
+                print_output_tail(reporter, "stderr", &output.stderr);
+                print_output_tail(reporter, "stdout", &output.stdout);
                 return Err(format!(
                     "exited with code {}",
                     output.status.code().unwrap_or(-1)
@@ -347,6 +381,23 @@ pub async fn spawn_long_lived_commands(
     skip_cmds: &[String],
     skip_readiness: &[String],
 ) -> Result<Vec<TrackedProcess>, CommandError> {
+    spawn_long_lived_commands_with_reporter(
+        config,
+        artifact_dir,
+        skip_cmds,
+        skip_readiness,
+        &STDOUT_PROGRESS_REPORTER,
+    )
+    .await
+}
+
+pub(crate) async fn spawn_long_lived_commands_with_reporter(
+    config: &Config,
+    artifact_dir: &ArtifactDir,
+    skip_cmds: &[String],
+    skip_readiness: &[String],
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<TrackedProcess>, CommandError> {
     let mut tracked = Vec::new();
 
     for (name, def) in &config.commands {
@@ -354,18 +405,22 @@ pub async fn spawn_long_lived_commands(
             continue;
         }
         if skip_cmds.contains(name) {
-            println!("SKIP ....... {name} (long-lived)");
+            reporter.line(&format!("SKIP ....... {name} (long-lived)"));
             // Readiness checks still run for skipped commands unless explicitly disabled
             let urls = def.effective_readiness_urls();
             if !urls.is_empty() {
                 if skip_readiness.contains(name) {
-                    println!("SKIP ....... {name} readiness check (--skip-readiness)");
+                    reporter.line(&format!(
+                        "SKIP ....... {name} readiness check (--skip-readiness)"
+                    ));
                 } else {
                     let timeout = readiness_timeout(def);
                     for url in &urls {
-                        println!("WAIT ....... {name} (skipped): polling {url}");
+                        reporter.line(&format!("WAIT ....... {name} (skipped): polling {url}"));
                         if let Err(e) = poll_readiness(url, timeout).await {
-                            println!("FAIL ....... {name} (skipped): readiness check failed");
+                            reporter.line(&format!(
+                                "FAIL ....... {name} (skipped): readiness check failed"
+                            ));
                             teardown_processes(&mut tracked).await;
                             return Err(CommandError::ReadinessFailed {
                                 name: name.to_string(),
@@ -374,14 +429,14 @@ pub async fn spawn_long_lived_commands(
                             });
                         }
                     }
-                    println!("READY ...... {name} (skipped)");
+                    reporter.line(&format!("READY ...... {name} (skipped)"));
                 }
             }
             continue;
         }
 
         tracing::info!(command = name.as_str(), cmd = %def.cmd, "spawning long-lived command");
-        println!("START ...... {name}: {}", def.cmd);
+        reporter.line(&format!("START ...... {name}: {}", def.cmd));
 
         let stdout_path = artifact_dir.logs.join(format!("{name}.stdout.log"));
         let stderr_path = artifact_dir.logs.join(format!("{name}.stderr.log"));
@@ -423,10 +478,10 @@ pub async fn spawn_long_lived_commands(
         if !urls.is_empty() {
             let timeout = readiness_timeout(def);
             for url in &urls {
-                println!("WAIT ....... {name}: polling {url}");
+                reporter.line(&format!("WAIT ....... {name}: polling {url}"));
                 if let Err(e) = poll_readiness(url, timeout).await {
                     // Readiness failed - tear down what we've started
-                    println!("FAIL ....... {name}: readiness check failed");
+                    reporter.line(&format!("FAIL ....... {name}: readiness check failed"));
                     teardown_processes(&mut tracked).await;
                     return Err(CommandError::ReadinessFailed {
                         name: name.to_string(),
@@ -435,7 +490,7 @@ pub async fn spawn_long_lived_commands(
                     });
                 }
             }
-            println!("READY ...... {name}");
+            reporter.line(&format!("READY ...... {name}"));
         }
     }
 
@@ -595,6 +650,24 @@ mod tests {
     use crate::config::{CommandDef, CommandKind, Config, ProviderConfig};
     use crate::test_support as common;
     use indexmap::IndexMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingReporter {
+        lines: Mutex<Vec<String>>,
+    }
+
+    impl RecordingReporter {
+        fn lines(&self) -> Vec<String> {
+            self.lines.lock().unwrap().clone()
+        }
+    }
+
+    impl ProgressReporter for RecordingReporter {
+        fn line(&self, line: &str) {
+            self.lines.lock().unwrap().push(line.to_string());
+        }
+    }
 
     fn make_config(commands: Vec<(&str, CommandKind, &str)>) -> Config {
         make_config_with_readiness(
@@ -727,6 +800,28 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "seed");
+    }
+
+    #[tokio::test]
+    async fn progress_reporter_is_injectable() {
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
+
+        let config = make_config(vec![("echo_test", CommandKind::ShortLived, "echo hello")]);
+        let reporter = RecordingReporter::default();
+
+        let results = run_short_lived_commands_with_reporter(&config, artifact_dir, &[], &reporter)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            reporter.lines(),
+            vec![
+                "RUN ........ echo_test: echo hello".to_string(),
+                "OK ......... echo_test (exit 0)".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
