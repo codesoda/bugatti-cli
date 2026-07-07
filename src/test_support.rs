@@ -1,3 +1,7 @@
+//! Shared test fixtures and mock providers used by both unit tests
+//! (`crate::test_support`) and integration tests (`bugatti::test_support`,
+//! via the `test-support` feature). Not part of the public API.
+
 use crate::provider::{
     AgentSession, BootstrapMessage, OutputChunk, OutputStream, ProviderError, StepMessage,
     VecOutputStream,
@@ -7,6 +11,7 @@ use async_trait::async_trait;
 use std::path::Path;
 use tempfile::TempDir;
 
+/// A temp-backed artifact directory for tests that only need artifacts.
 pub struct ArtifactCase {
     _tmp: TempDir,
     pub artifact_dir: ArtifactDir,
@@ -31,6 +36,7 @@ impl Default for ArtifactCase {
     }
 }
 
+/// [`ArtifactCase`] plus run/session identifiers, for executor-level tests.
 pub struct RunCase {
     _tmp: TempDir,
     pub run_id: RunId,
@@ -40,16 +46,12 @@ pub struct RunCase {
 
 impl RunCase {
     pub fn new() -> Self {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run-001".to_string());
-        let session_id = SessionId("test-session-001".to_string());
-        let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        artifact_dir.create_all().unwrap();
+        let case = ArtifactCase::new();
         Self {
-            _tmp: tmp,
-            run_id,
-            session_id,
-            artifact_dir,
+            _tmp: case._tmp,
+            run_id: RunId("test-run-001".to_string()),
+            session_id: SessionId("test-session-001".to_string()),
+            artifact_dir: case.artifact_dir,
         }
     }
 }
@@ -60,6 +62,12 @@ impl Default for RunCase {
     }
 }
 
+/// A scripted [`AgentSession`] that replays pre-configured responses.
+///
+/// Response exhaustion is strict: once every scripted response has been
+/// consumed, `send_step` returns `Err(ProviderError::SendFailed)` rather
+/// than an endless `RESULT OK` (which the old integration-test mock did).
+/// Script exactly as many responses as the steps you execute.
 pub struct MockSession {
     responses: Vec<Vec<Result<OutputChunk, ProviderError>>>,
     call_count: usize,

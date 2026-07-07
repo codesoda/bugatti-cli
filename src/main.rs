@@ -39,6 +39,18 @@ fn init_cli_tracing() {
         .try_init();
 }
 
+/// Factory that creates a provider session for a test run. Production code
+/// passes `&provider::initialize_session`; tests inject mock factories.
+trait SessionFactory:
+    Fn(&config::Config, &Path, bool) -> Result<Box<dyn AgentSession>, ProviderError>
+{
+}
+
+impl<F> SessionFactory for F where
+    F: Fn(&config::Config, &Path, bool) -> Result<Box<dyn AgentSession>, ProviderError>
+{
+}
+
 /// Display a path relative to the current directory, falling back to absolute.
 fn relative_display(path: &Path) -> String {
     std::env::current_dir()
@@ -279,7 +291,7 @@ async fn run_test_pipeline<F>(
     session_factory: &F,
 ) -> TestRunResult
 where
-    F: Fn(&config::Config, &Path, bool) -> Result<Box<dyn AgentSession>, ProviderError>,
+    F: SessionFactory,
 {
     let test_name_fallback = test_path.display().to_string();
 
@@ -486,7 +498,7 @@ async fn run_test_with_artifacts<F>(
     session_factory: &F,
 ) -> TestRunResult
 where
-    F: Fn(&config::Config, &Path, bool) -> Result<Box<dyn AgentSession>, ProviderError>,
+    F: SessionFactory,
 {
     // Phase 7: Initialize tracing
     let _tracing_guard = match diagnostics::init_tracing(ctx.artifact_dir) {
@@ -742,7 +754,7 @@ async fn run_discovery<F>(
     session_factory: &F,
 ) -> i32
 where
-    F: Fn(&config::Config, &Path, bool) -> Result<Box<dyn AgentSession>, ProviderError>,
+    F: SessionFactory,
 {
     println!("Discovering root test files...");
 
@@ -843,7 +855,7 @@ async fn run_single_test<F>(
     session_factory: &F,
 ) -> TestRunResult
 where
-    F: Fn(&config::Config, &Path, bool) -> Result<Box<dyn AgentSession>, ProviderError>,
+    F: SessionFactory,
 {
     println!("═══════════════════════════════════════════════════════");
     println!("Running: {} ({})", test.name, relative_display(&test.path));

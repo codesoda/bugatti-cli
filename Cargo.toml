@@ -28,3 +28,12 @@ tar = "0.4"
 self-replace = "1"
 tempfile = "3"
 thiserror = "1"
+
+[features]
+# Exposes `bugatti::test_support` (shared mocks and test fixtures) to
+# integration tests. Enabled via the self dev-dependency below so the
+# helpers never ship in release builds.
+test-support = []
+
+[dev-dependencies]
+bugatti = { path = ".", features = ["test-support"] }
