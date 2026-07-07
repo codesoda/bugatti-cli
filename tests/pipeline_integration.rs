@@ -16,10 +16,7 @@ use bugatti::report::{self, ReportInput};
 use bugatti::run::{self, EffectiveConfigSummary};
 use bugatti::test_file;
 
-#[allow(dead_code)]
-mod common {
-    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/mod.rs"));
-}
+use bugatti::test_support as common;
 
 /// Test the full pipeline with a mock provider: config -> parse -> expand ->
 /// artifacts -> execution -> report -> exit code.

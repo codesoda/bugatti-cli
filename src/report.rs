@@ -310,10 +310,7 @@ fn format_duration(d: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[allow(dead_code)]
-    mod common {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/mod.rs"));
-    }
+    use crate::test_support as common;
 
     use super::*;
     use crate::executor::{LogEvent, RunOutcome, StepOutcome, StepResult, StepVerdict};

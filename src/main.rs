@@ -946,10 +946,7 @@ fn print_run_references(results: &[TestRunResult]) {
 
 #[cfg(test)]
 mod tests {
-    #[allow(dead_code)]
-    mod common {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/mod.rs"));
-    }
+    use bugatti::test_support as common;
 
     use clap::Parser;
     use std::path::PathBuf;
@@ -1310,6 +1307,64 @@ instruction = "This step never runs"
     }
 
     #[tokio::test]
+    async fn run_test_pipeline_reports_setup_command_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+
+        std::fs::write(
+            project_root.join("bugatti.config.toml"),
+            r#"
+[commands.setup]
+kind = "short_lived"
+cmd = "exit 1"
+"#,
+        )
+        .expect("write config file");
+
+        let test_path = project_root.join("setup-fail.test.toml");
+        std::fs::write(
+            &test_path,
+            r#"
+name = "setup-fail"
+
+[[steps]]
+instruction = "This step never runs"
+"#,
+        )
+        .expect("write test file");
+
+        let session_factory =
+            |_config: &bugatti::config::Config,
+             _artifact_dir: &std::path::Path,
+             _verbose: bool|
+             -> Result<Box<dyn bugatti::provider::AgentSession>, ProviderError> {
+                panic!("session factory should not be called when setup fails")
+            };
+
+        let result = run_test_pipeline(
+            project_root,
+            &test_path,
+            &[],
+            &[],
+            false,
+            None,
+            false,
+            None,
+            &session_factory,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, bugatti::exit_code::EXIT_SETUP_ERROR);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("setup command failed"));
+        let report_path = std::path::Path::new(result.report_path.as_ref().unwrap());
+        assert!(report_path.is_file(), "missing report: {report_path:?}");
+    }
+
+    #[tokio::test]
     async fn run_discovery_aggregates_pass_and_fail() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let project_root = tmp.path();
@@ -1373,5 +1428,53 @@ instruction = "Fails"
         let runs_dir = project_root.join(".bugatti").join("runs");
         let run_count = std::fs::read_dir(&runs_dir).expect("runs dir").count();
         assert_eq!(run_count, 2, "expected one run per discovered test");
+    }
+
+    #[tokio::test]
+    async fn run_discovery_aggregates_parse_errors_and_pass() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path();
+
+        std::fs::write(
+            project_root.join("pass.test.toml"),
+            r#"
+name = "pass"
+
+[[steps]]
+instruction = "Passes"
+"#,
+        )
+        .expect("write pass test");
+
+        std::fs::write(
+            project_root.join("broken.test.toml"),
+            "name = \"broken\"\n[[steps]\ninstruction = \"Missing bracket\"",
+        )
+        .expect("write broken test");
+
+        let session_factory = |_config: &bugatti::config::Config,
+                               _artifact_dir: &std::path::Path,
+                               _verbose: bool|
+         -> Result<
+            Box<dyn bugatti::provider::AgentSession>,
+            ProviderError,
+        > { Ok(Box::new(common::MockSession::with_ok_responses(1))) };
+
+        let exit_code = run_discovery(
+            project_root,
+            &[],
+            &[],
+            false,
+            None,
+            false,
+            None,
+            &session_factory,
+        )
+        .await;
+
+        assert_eq!(exit_code, bugatti::exit_code::EXIT_CONFIG_ERROR);
+        let runs_dir = project_root.join(".bugatti").join("runs");
+        let run_count = std::fs::read_dir(&runs_dir).expect("runs dir").count();
+        assert_eq!(run_count, 1, "expected only the valid test to run");
     }
 }

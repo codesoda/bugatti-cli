@@ -591,13 +591,9 @@ async fn teardown_single(process: &mut TrackedProcess) -> TeardownResult {
 
 #[cfg(test)]
 mod tests {
-    #[allow(dead_code)]
-    mod common {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/mod.rs"));
-    }
-
     use super::*;
     use crate::config::{CommandDef, CommandKind, Config, ProviderConfig};
+    use crate::test_support as common;
     use indexmap::IndexMap;
 
     fn make_config(commands: Vec<(&str, CommandKind, &str)>) -> Config {
