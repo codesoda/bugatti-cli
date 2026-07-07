@@ -1748,7 +1748,7 @@ mod tests {
             test_file: "tests/login.test.toml",
             extra_system_prompt: None,
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1769,7 +1769,7 @@ mod tests {
             test_file: "tests/login.test.toml",
             extra_system_prompt: None,
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-abc".to_string());
         let session_id = SessionId("sess-xyz".to_string());
@@ -1791,7 +1791,7 @@ mod tests {
             test_file: "test.test.toml",
             extra_system_prompt: Some("Be concise and thorough"),
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1813,7 +1813,7 @@ mod tests {
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1832,7 +1832,7 @@ mod tests {
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: Some("http://localhost:3000"),
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1849,7 +1849,7 @@ mod tests {
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1873,7 +1873,7 @@ mod tests {
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
 
         let _outcome = execute_steps(

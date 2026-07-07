@@ -429,7 +429,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("# Bugatti Run Report"));
@@ -461,7 +461,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("**FAILED**"));
@@ -487,7 +487,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("Step 1 - WARN"));
@@ -518,7 +518,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(!report.contains("BUGATTI_LOG events:"));
@@ -545,7 +545,7 @@ mod tests {
             &skipped,
             &summary,
             &outcome,
-            &artifact_dir,
+            artifact_dir,
         );
         let report = compile_report(&input);
 
@@ -568,7 +568,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(!report.contains("## Skipped Commands"));
@@ -588,7 +588,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("## Effective Configuration"));
@@ -613,7 +613,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("## Artifacts"));
@@ -645,7 +645,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("PROTOCOL ERROR"));
@@ -666,10 +666,10 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
-        write_report(&input, &artifact_dir).unwrap();
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
+        write_report(&input, artifact_dir).unwrap();
 
-        let path = report_path(&artifact_dir);
+        let path = report_path(artifact_dir);
         assert!(path.is_file());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("# Bugatti Run Report"));
@@ -690,10 +690,10 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
-        write_report(&input, &artifact_dir).unwrap();
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
+        write_report(&input, artifact_dir).unwrap();
 
-        let path = report_path(&artifact_dir);
+        let path = report_path(artifact_dir);
         assert!(path.is_file());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("**FAILED**"));
@@ -730,7 +730,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("step_0000.txt"));
@@ -751,7 +751,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("Full Transcript"));
@@ -777,7 +777,7 @@ mod tests {
         ];
 
         let mut input =
-            make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+            make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         input.artifact_errors = &errors;
         let report = compile_report(&input);
 
@@ -800,7 +800,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(!report.contains("## Artifact Capture Errors"));
@@ -839,7 +839,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("**Evidence:**"));
@@ -874,7 +874,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(!report.contains("**Evidence:**"));
@@ -905,7 +905,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("**Evidence:**"));

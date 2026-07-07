@@ -635,7 +635,7 @@ mod tests {
 
         let config = make_config(vec![("echo_test", CommandKind::ShortLived, "echo hello")]);
 
-        let results = run_short_lived_commands(&config, &artifact_dir, &[])
+        let results = run_short_lived_commands(&config, artifact_dir, &[])
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -657,7 +657,7 @@ mod tests {
 
         let config = make_config(vec![("fail_cmd", CommandKind::ShortLived, "exit 42")]);
 
-        let err = run_short_lived_commands(&config, &artifact_dir, &[])
+        let err = run_short_lived_commands(&config, artifact_dir, &[])
             .await
             .unwrap_err();
         match err {
@@ -682,7 +682,7 @@ mod tests {
             "echo stdout_msg && echo stderr_msg >&2",
         )]);
 
-        let results = run_short_lived_commands(&config, &artifact_dir, &[])
+        let results = run_short_lived_commands(&config, artifact_dir, &[])
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -704,7 +704,7 @@ mod tests {
             ("server", CommandKind::LongLived, "echo server"),
         ]);
 
-        let results = run_short_lived_commands(&config, &artifact_dir, &[])
+        let results = run_short_lived_commands(&config, artifact_dir, &[])
             .await
             .unwrap();
         // Only the short-lived command should have run
@@ -722,7 +722,7 @@ mod tests {
             ("seed", CommandKind::ShortLived, "echo seed"),
         ]);
 
-        let results = run_short_lived_commands(&config, &artifact_dir, &["migrate".to_string()])
+        let results = run_short_lived_commands(&config, artifact_dir, &["migrate".to_string()])
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -740,7 +740,7 @@ mod tests {
             ("b_second", CommandKind::ShortLived, "echo should_not_run"),
         ]);
 
-        let err = run_short_lived_commands(&config, &artifact_dir, &[])
+        let err = run_short_lived_commands(&config, artifact_dir, &[])
             .await
             .unwrap_err();
         match err {
@@ -769,7 +769,7 @@ mod tests {
             "echo long_lived_output && sleep 60",
         )]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[])
+        let mut tracked = spawn_long_lived_commands(&config, artifact_dir, &[], &[])
             .await
             .unwrap();
         assert_eq!(tracked.len(), 1);
@@ -801,7 +801,7 @@ mod tests {
         ]);
 
         let mut tracked =
-            spawn_long_lived_commands(&config, &artifact_dir, &["server".to_string()], &[])
+            spawn_long_lived_commands(&config, artifact_dir, &["server".to_string()], &[])
                 .await
                 .unwrap();
         assert_eq!(tracked.len(), 1);
@@ -817,7 +817,7 @@ mod tests {
 
         let config = make_config(vec![("sleeper", CommandKind::LongLived, "sleep 600")]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[])
+        let mut tracked = spawn_long_lived_commands(&config, artifact_dir, &[], &[])
             .await
             .unwrap();
         assert_eq!(tracked.len(), 1);
@@ -839,7 +839,7 @@ mod tests {
         // Command that exits immediately
         let config = make_config(vec![("quick_exit", CommandKind::LongLived, "exit 1")]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[])
+        let mut tracked = spawn_long_lived_commands(&config, artifact_dir, &[], &[])
             .await
             .unwrap();
 
@@ -943,7 +943,7 @@ mod tests {
         // Skip both the command and its readiness check
         let tracked = spawn_long_lived_commands(
             &config,
-            &artifact_dir,
+            artifact_dir,
             &["server".to_string()],
             &["server".to_string()],
         )
@@ -964,7 +964,7 @@ mod tests {
             ("server", CommandKind::LongLived, "sleep 60"),
         ]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[])
+        let mut tracked = spawn_long_lived_commands(&config, artifact_dir, &[], &[])
             .await
             .unwrap();
         // Only long-lived should be spawned
@@ -987,7 +987,7 @@ mod tests {
             ("a_first", CommandKind::ShortLived, "echo a_first"),
         ]);
 
-        let results = run_short_lived_commands(&config, &artifact_dir, &[])
+        let results = run_short_lived_commands(&config, artifact_dir, &[])
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
