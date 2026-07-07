@@ -310,19 +310,13 @@ fn format_duration(d: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support as common;
+
     use super::*;
     use crate::executor::{LogEvent, RunOutcome, StepOutcome, StepResult, StepVerdict};
-    use crate::run::{ArtifactDir, EffectiveConfigSummary, RunId, SessionId};
+    use crate::run::{EffectiveConfigSummary, RunId, SessionId};
     use std::path::PathBuf;
     use std::time::Duration;
-
-    fn test_artifact_dir() -> (tempfile::TempDir, ArtifactDir) {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run-001".to_string());
-        let dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        dir.create_all().unwrap();
-        (tmp, dir)
-    }
 
     fn test_config_summary() -> EffectiveConfigSummary {
         EffectiveConfigSummary {
@@ -422,7 +416,8 @@ mod tests {
     fn compile_report_successful_run() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![
@@ -434,7 +429,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("# Bugatti Run Report"));
@@ -453,7 +448,8 @@ mod tests {
     fn compile_report_failed_run_with_log_events() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![
@@ -465,7 +461,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("**FAILED**"));
@@ -481,7 +477,8 @@ mod tests {
     fn compile_report_warn_step_includes_log_events() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![make_warn_step(0, "response took 2.5s")],
@@ -490,7 +487,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("Step 1 - WARN"));
@@ -502,7 +499,8 @@ mod tests {
     fn compile_report_ok_step_excludes_log_events() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
 
         // OK step with log events - they should NOT appear in the report
@@ -520,7 +518,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(!report.contains("BUGATTI_LOG events:"));
@@ -530,7 +528,8 @@ mod tests {
     fn compile_report_with_skipped_commands() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![make_ok_step(0, "Check homepage")],
@@ -546,7 +545,7 @@ mod tests {
             &skipped,
             &summary,
             &outcome,
-            &artifact_dir,
+            artifact_dir,
         );
         let report = compile_report(&input);
 
@@ -559,7 +558,8 @@ mod tests {
     fn compile_report_no_skipped_commands_omits_section() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![make_ok_step(0, "Check homepage")],
@@ -568,7 +568,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(!report.contains("## Skipped Commands"));
@@ -578,7 +578,8 @@ mod tests {
     fn compile_report_includes_config_summary() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![],
@@ -587,7 +588,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("## Effective Configuration"));
@@ -602,7 +603,8 @@ mod tests {
     fn compile_report_includes_artifact_paths() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![],
@@ -611,7 +613,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("## Artifacts"));
@@ -623,7 +625,8 @@ mod tests {
     fn compile_report_protocol_error_step() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![StepOutcome {
@@ -642,7 +645,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("PROTOCOL ERROR"));
@@ -653,7 +656,8 @@ mod tests {
     fn write_report_creates_file() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![make_ok_step(0, "Check homepage")],
@@ -662,10 +666,10 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
-        write_report(&input, &artifact_dir).unwrap();
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
+        write_report(&input, artifact_dir).unwrap();
 
-        let path = report_path(&artifact_dir);
+        let path = report_path(artifact_dir);
         assert!(path.is_file());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("# Bugatti Run Report"));
@@ -676,7 +680,8 @@ mod tests {
     fn write_report_failed_run_still_writes() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![make_error_step(0, "server crashed")],
@@ -685,10 +690,10 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
-        write_report(&input, &artifact_dir).unwrap();
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
+        write_report(&input, artifact_dir).unwrap();
 
-        let path = report_path(&artifact_dir);
+        let path = report_path(artifact_dir);
         assert!(path.is_file());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("**FAILED**"));
@@ -712,7 +717,8 @@ mod tests {
     fn compile_report_includes_transcript_paths_per_step() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![
@@ -724,7 +730,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("step_0000.txt"));
@@ -735,7 +741,8 @@ mod tests {
     fn compile_report_includes_full_transcript_path() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![make_ok_step(0, "Check homepage")],
@@ -744,7 +751,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("Full Transcript"));
@@ -755,7 +762,8 @@ mod tests {
     fn compile_report_includes_artifact_errors() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![make_ok_step(0, "Check homepage")],
@@ -769,7 +777,7 @@ mod tests {
         ];
 
         let mut input =
-            make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+            make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         input.artifact_errors = &errors;
         let report = compile_report(&input);
 
@@ -782,7 +790,8 @@ mod tests {
     fn compile_report_no_artifact_errors_omits_section() {
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
         let outcome = RunOutcome {
             steps: vec![make_ok_step(0, "Check homepage")],
@@ -791,7 +800,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(!report.contains("## Artifact Capture Errors"));
@@ -803,7 +812,8 @@ mod tests {
 
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
 
         let mut step = make_error_step(0, "login button missing");
@@ -829,7 +839,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("**Evidence:**"));
@@ -845,7 +855,8 @@ mod tests {
 
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
 
         let mut step = make_ok_step(0, "Check homepage");
@@ -863,7 +874,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(!report.contains("**Evidence:**"));
@@ -875,7 +886,8 @@ mod tests {
 
         let run_id = RunId("test-run-001".to_string());
         let session_id = SessionId("test-session-001".to_string());
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let summary = test_config_summary();
 
         let mut step = make_error_step(0, "page not loading");
@@ -893,7 +905,7 @@ mod tests {
             artifact_errors: vec![],
         };
 
-        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, &artifact_dir);
+        let input = make_report_input(&run_id, &session_id, &[], &summary, &outcome, artifact_dir);
         let report = compile_report(&input);
 
         assert!(report.contains("**Evidence:**"));

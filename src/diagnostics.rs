@@ -1,9 +1,11 @@
 use crate::run::ArtifactDir;
 use serde::Serialize;
 use std::path::PathBuf;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 /// The filename for the harness diagnostics log within the diagnostics/ directory.
 const DIAGNOSTICS_FILENAME: &str = "harness_trace.jsonl";
@@ -28,6 +30,16 @@ pub fn init_tracing(artifact_dir: &ArtifactDir) -> Result<TracingGuard, TracingE
 
     let file_writer = FileWriter(std::sync::Mutex::new(file));
 
+    // Mirror only warnings and errors to stderr so problems stay visible while
+    // the artifact-scoped subscriber is active. The full event stream (all
+    // levels) belongs exclusively in the JSON diagnostics file below.
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .with_timer(tracing_subscriber::fmt::time::uptime())
+        .with_level(true)
+        .with_filter(LevelFilter::WARN);
+
     let json_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_writer(file_writer)
@@ -35,7 +47,9 @@ pub fn init_tracing(artifact_dir: &ArtifactDir) -> Result<TracingGuard, TracingE
         .with_timer(tracing_subscriber::fmt::time::uptime())
         .with_level(true);
 
-    let subscriber = tracing_subscriber::registry().with(json_layer);
+    let subscriber = tracing_subscriber::registry()
+        .with(stderr_layer)
+        .with(json_layer);
 
     let guard = subscriber.set_default();
 
