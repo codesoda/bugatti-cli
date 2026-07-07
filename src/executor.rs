@@ -933,12 +933,13 @@ async fn execute_single_step(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support as common;
+
     use super::*;
-    use crate::config::Config;
-    use crate::provider::{
-        AgentSession, BootstrapMessage, OutputChunk, ProviderError, StepMessage,
-    };
-    use std::path::Path;
+    use crate::provider::{OutputChunk, ProviderError};
+    use std::sync::atomic::Ordering;
+
+    use common::{MockSession, RunCase};
 
     // --- Result marker parsing tests ---
 
@@ -1018,66 +1019,6 @@ mod tests {
         );
     }
 
-    // --- Mock provider for execution tests ---
-
-    struct MockSession {
-        responses: Vec<Vec<Result<OutputChunk, ProviderError>>>,
-        call_count: usize,
-    }
-
-    impl MockSession {
-        fn new(responses: Vec<Vec<Result<OutputChunk, ProviderError>>>) -> Self {
-            Self {
-                responses,
-                call_count: 0,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl AgentSession for MockSession {
-        fn initialize(
-            _config: &Config,
-            _artifact_dir: &Path,
-            _verbose: bool,
-        ) -> Result<Self, ProviderError>
-        where
-            Self: Sized,
-        {
-            Ok(Self::new(vec![]))
-        }
-
-        async fn start(&mut self) -> Result<(), ProviderError> {
-            Ok(())
-        }
-
-        async fn send_bootstrap(
-            &mut self,
-            _message: BootstrapMessage,
-        ) -> Result<Box<dyn crate::provider::OutputStream + '_>, ProviderError> {
-            Ok(Box::new(crate::provider::VecOutputStream::empty()))
-        }
-
-        async fn send_step(
-            &mut self,
-            _message: StepMessage,
-        ) -> Result<Box<dyn crate::provider::OutputStream + '_>, ProviderError> {
-            if self.call_count < self.responses.len() {
-                let idx = self.call_count;
-                self.call_count += 1;
-                Ok(Box::new(crate::provider::VecOutputStream::new(
-                    self.responses[idx].clone(),
-                )))
-            } else {
-                Err(ProviderError::SendFailed("no more responses".to_string()))
-            }
-        }
-
-        async fn close(&mut self) -> Result<(), ProviderError> {
-            Ok(())
-        }
-    }
-
     fn test_steps() -> Vec<ExpandedStep> {
         vec![
             ExpandedStep {
@@ -1105,26 +1046,11 @@ mod tests {
         ]
     }
 
-    fn test_run_ids() -> (RunId, SessionId) {
-        (
-            RunId("test-run-001".to_string()),
-            SessionId("test-session-001".to_string()),
-        )
-    }
-
-    fn test_artifact_dir() -> (tempfile::TempDir, ArtifactDir) {
-        let tmp = tempfile::tempdir().unwrap();
-        let run_id = RunId("test-run-001".to_string());
-        let dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
-        dir.create_all().unwrap();
-        (tmp, dir)
-    }
-
     #[tokio::test]
     async fn execute_steps_all_ok() {
         let steps = test_steps();
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![
             vec![
@@ -1144,9 +1070,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1171,8 +1097,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_stops_on_error() {
         let steps = test_steps();
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![
             vec![
@@ -1191,9 +1117,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1214,8 +1140,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_warn_continues() {
         let steps = test_steps();
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![
             vec![
@@ -1231,9 +1157,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1254,8 +1180,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_missing_result_marker() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text(
@@ -1267,9 +1193,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1289,8 +1215,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_provider_send_failure() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         // Empty responses means send_step returns error
         let mut session = MockSession::new(vec![]);
@@ -1298,9 +1224,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1320,8 +1246,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_provider_stream_error() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text("partial output".to_string())),
@@ -1331,9 +1257,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1355,8 +1281,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_writes_transcript_artifacts() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text("Check complete.\nRESULT OK".to_string())),
@@ -1366,9 +1292,9 @@ mod tests {
         let _outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1393,8 +1319,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_full_transcript_written_incrementally() {
         let steps = test_steps();
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![
             vec![
@@ -1414,9 +1340,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1441,8 +1367,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_full_transcript_captures_partial_on_failure() {
         let steps = test_steps();
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![
             vec![
@@ -1461,9 +1387,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1485,8 +1411,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_records_duration() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text("RESULT OK".to_string())),
@@ -1496,9 +1422,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1526,8 +1452,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_multiple_text_chunks_concatenated() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text("First chunk. ".to_string())),
@@ -1539,9 +1465,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1610,8 +1536,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_captures_log_events() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text(
@@ -1623,9 +1549,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1646,8 +1572,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_no_log_events() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text("No logs here.\nRESULT OK".to_string())),
@@ -1657,9 +1583,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1678,8 +1604,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_writes_log_events_file() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text(
@@ -1691,9 +1617,9 @@ mod tests {
         let _outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1720,8 +1646,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_evidence_refs_for_error() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text(
@@ -1733,9 +1659,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1756,8 +1682,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_evidence_refs_for_warn() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text("RESULT WARN: slow response".to_string())),
@@ -1767,9 +1693,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1785,8 +1711,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_evidence_refs_empty_for_ok() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text("RESULT OK".to_string())),
@@ -1796,9 +1722,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -1815,13 +1741,14 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_includes_result_contract() {
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let config = BootstrapConfig {
             test_name: "Login test",
             test_file: "tests/login.test.toml",
             extra_system_prompt: None,
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1835,13 +1762,14 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_includes_test_metadata() {
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let config = BootstrapConfig {
             test_name: "Login test",
             test_file: "tests/login.test.toml",
             extra_system_prompt: None,
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-abc".to_string());
         let session_id = SessionId("sess-xyz".to_string());
@@ -1856,13 +1784,14 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_includes_extra_system_prompt() {
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let config = BootstrapConfig {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: Some("Be concise and thorough"),
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1877,13 +1806,14 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_omits_prompt_when_none() {
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let config = BootstrapConfig {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1895,13 +1825,14 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_includes_base_url() {
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let config = BootstrapConfig {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: Some("http://localhost:3000"),
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1911,13 +1842,14 @@ mod tests {
 
     #[test]
     fn build_bootstrap_content_omits_base_url_when_none() {
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let artifact_case = common::ArtifactCase::new();
+        let artifact_dir = &artifact_case.artifact_dir;
         let config = BootstrapConfig {
             test_name: "Test",
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
         let run_id = RunId("run-1".to_string());
         let session_id = SessionId("sess-1".to_string());
@@ -1928,8 +1860,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_with_bootstrap_writes_transcript() {
         let steps = vec![test_steps().remove(0)];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![vec![
             Ok(OutputChunk::Text("RESULT OK".to_string())),
@@ -1941,15 +1873,15 @@ mod tests {
             test_file: "test.test.toml",
             extra_system_prompt: None,
             base_url: None,
-            artifact_dir: &artifact_dir,
+            artifact_dir,
         };
 
         let _outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             Some(&bootstrap),
             None,
@@ -1974,8 +1906,8 @@ mod tests {
     #[tokio::test]
     async fn execute_steps_interrupted_between_steps() {
         let steps = test_steps(); // 2 steps
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![
             vec![
@@ -1998,9 +1930,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -2031,8 +1963,8 @@ mod tests {
             setup: true,
             checkpoint: None,
         }];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         // Agent responds without a RESULT marker — should be OK for setup steps
         let mut session = MockSession::new(vec![vec![
@@ -2045,9 +1977,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -2103,8 +2035,8 @@ mod tests {
                 checkpoint: None,
             },
         ];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         // Only 2 steps should execute: the setup step (bypasses skip) and the non-skipped step
         let mut session = MockSession::new(vec![
@@ -2121,9 +2053,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -2181,8 +2113,8 @@ mod tests {
                 checkpoint: None,
             },
         ];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         let mut session = MockSession::new(vec![
             vec![
@@ -2200,9 +2132,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,
@@ -2251,8 +2183,8 @@ mod tests {
                 checkpoint: None,
             },
         ];
-        let (run_id, session_id) = test_run_ids();
-        let (_tmp, artifact_dir) = test_artifact_dir();
+        let run_case = RunCase::new();
+        let artifact_dir = &run_case.artifact_dir;
 
         // Setup step gets a provider error — should abort, second step never runs
         let mut session = MockSession::new(vec![
@@ -2268,9 +2200,9 @@ mod tests {
         let outcome = execute_steps(
             &mut session,
             &steps,
-            &run_id,
-            &session_id,
-            &artifact_dir,
+            &run_case.run_id,
+            &run_case.session_id,
+            artifact_dir,
             None,
             None,
             None,

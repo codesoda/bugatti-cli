@@ -140,6 +140,7 @@ name = "bugatti"
 version = "0.6.0"
 dependencies = [
  "async-trait",
+ "bugatti",
  "chrono",
  "clap",
  "ctrlc",
