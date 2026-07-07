@@ -316,7 +316,7 @@ async fn run_test_pipeline(
             exit_code: EXIT_CONFIG_ERROR,
             run_id: None,
             report_path: None,
-            error: Some(msg),
+            error: Some(msg.to_string()),
         };
     }
 
@@ -328,7 +328,7 @@ async fn run_test_pipeline(
             exit_code: EXIT_CONFIG_ERROR,
             run_id: None,
             report_path: None,
-            error: Some(msg),
+            error: Some(msg.to_string()),
         };
     }
 
