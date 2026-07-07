@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::run::{RunId, SessionId};
+use async_trait::async_trait;
 use std::path::Path;
 
 /// A message sent to the provider for a single step.
@@ -39,11 +40,57 @@ pub enum OutputChunk {
     Done,
 }
 
+/// An asynchronous stream of output chunks from the provider for one turn.
+///
+/// This is the async replacement for the previous `Iterator<Item = Result<OutputChunk, _>>`
+/// streaming interface: callers repeatedly await `next_chunk` until it returns `None`
+/// (stream exhausted) or an `OutputChunk::Done` is yielded (turn complete).
+#[async_trait]
+pub trait OutputStream: Send {
+    /// Await the next chunk of output. Returns `None` when the stream is exhausted.
+    async fn next_chunk(&mut self) -> Option<Result<OutputChunk, ProviderError>>;
+}
+
+/// An `OutputStream` backed by a pre-collected list of chunks.
+///
+/// Useful for providers that complete a turn without streaming (e.g. bootstrap
+/// handling that makes no model call) and for tests.
+pub struct VecOutputStream {
+    chunks: std::vec::IntoIter<Result<OutputChunk, ProviderError>>,
+}
+
+impl VecOutputStream {
+    /// Create a stream that yields the given chunks in order.
+    pub fn new(chunks: Vec<Result<OutputChunk, ProviderError>>) -> Self {
+        Self {
+            chunks: chunks.into_iter(),
+        }
+    }
+
+    /// Create a stream that yields a single `OutputChunk::Done`.
+    pub fn done() -> Self {
+        Self::new(vec![Ok(OutputChunk::Done)])
+    }
+
+    /// Create an empty stream.
+    pub fn empty() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+#[async_trait]
+impl OutputStream for VecOutputStream {
+    async fn next_chunk(&mut self) -> Option<Result<OutputChunk, ProviderError>> {
+        self.chunks.next()
+    }
+}
+
 /// Provider-agnostic trait representing one long-lived agent session.
 ///
 /// The harness uses this trait to communicate with any provider (Claude Code, etc.)
 /// without coupling to provider-specific details. One session spans the entire test run.
-pub trait AgentSession {
+#[async_trait]
+pub trait AgentSession: Send {
     /// Initialize a new session from the effective config.
     ///
     /// The config has already been resolved (global + per-test overrides merged).
@@ -62,31 +109,31 @@ pub trait AgentSession {
     /// Start the conversation / underlying process.
     ///
     /// Called once after initialization, before any messages are sent.
-    fn start(&mut self) -> Result<(), ProviderError>;
+    async fn start(&mut self) -> Result<(), ProviderError>;
 
     /// Send a bootstrap message at the beginning of the session.
     ///
     /// This delivers harness instructions, extra system prompt, and context
     /// before any test steps execute. The provider streams its response
-    /// through the returned iterator.
-    fn send_bootstrap(
+    /// through the returned stream.
+    async fn send_bootstrap(
         &mut self,
         message: BootstrapMessage,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>;
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError>;
 
     /// Send a step message and receive streamed output.
     ///
     /// The message includes run ID, session ID, and step ID for traceability.
-    /// Returns an iterator of output chunks for live display and transcript capture.
-    fn send_step(
+    /// Returns a stream of output chunks for live display and transcript capture.
+    async fn send_step(
         &mut self,
         message: StepMessage,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>;
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError>;
 
     /// Close the session and clean up resources.
     ///
     /// Called at the end of a run (success or failure) to shut down the provider process.
-    fn close(&mut self) -> Result<(), ProviderError>;
+    async fn close(&mut self) -> Result<(), ProviderError>;
 }
 
 /// Format a step message with metadata prefix for sending to the provider.

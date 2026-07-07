@@ -1,12 +1,15 @@
 use crate::config::Config;
 use crate::provider::{
-    format_step_message, AgentSession, BootstrapMessage, OutputChunk, ProviderError, StepMessage,
+    format_step_message, AgentSession, BootstrapMessage, OutputChunk, OutputStream, ProviderError,
+    StepMessage, VecOutputStream,
 };
+use async_trait::async_trait;
 use serde::Deserialize;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{ExitStatus, Stdio};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdout, Command};
 
 /// Compact base system prompt for the driving `pi` agent.
 ///
@@ -123,17 +126,19 @@ impl PiAdapter {
     }
 
     /// Spawn a single pi turn, sending `prompt` on stdin and streaming output.
-    fn spawn_turn(
+    async fn spawn_turn(
         &mut self,
         prompt: &str,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
         // Persist the bootstrap as an artifact for debugging. The return value
         // is intentionally unused for launching: pi receives the bootstrap as
         // inline content below, not as a path argument.
         let _bootstrap_path = self.ensure_bootstrap_file()?;
 
         let mut cmd = Command::new(&self.binary_path);
+        // If the stream is abandoned mid-turn (e.g. step timeout or Ctrl+C),
+        // make sure the pi subprocess doesn't linger.
+        cmd.kill_on_drop(true);
         cmd.arg("--print")
             .arg("--mode")
             .arg("json")
@@ -161,12 +166,13 @@ impl PiAdapter {
 
         if self.verbose {
             let args: Vec<_> = cmd
+                .as_std()
                 .get_args()
                 .map(|arg| arg.to_string_lossy().to_string())
                 .collect();
             eprintln!(
                 "\x1b[38;5;243m[verbose]\x1b[0m \x1b[38;5;243mlaunch:\x1b[0m \x1b[38;5;152m{} {}\x1b[0m",
-                cmd.get_program().to_string_lossy(),
+                cmd.as_std().get_program().to_string_lossy(),
                 args.join(" ")
             );
         }
@@ -181,9 +187,11 @@ impl PiAdapter {
             .ok_or_else(|| ProviderError::StartFailed("failed to capture stdin".to_string()))?;
         stdin
             .write_all(prompt.as_bytes())
+            .await
             .map_err(|e| ProviderError::SendFailed(format!("failed to write to stdin: {e}")))?;
         stdin
             .flush()
+            .await
             .map_err(|e| ProviderError::SendFailed(format!("failed to flush stdin: {e}")))?;
         drop(stdin);
 
@@ -194,7 +202,7 @@ impl PiAdapter {
 
         self.turn_index += 1;
 
-        Ok(Box::new(PiTurnIterator {
+        Ok(Box::new(PiTurnStream {
             child,
             reader: BufReader::new(stdout),
             verbose: self.verbose,
@@ -204,6 +212,7 @@ impl PiAdapter {
     }
 }
 
+#[async_trait]
 impl AgentSession for PiAdapter {
     fn initialize(
         config: &Config,
@@ -244,31 +253,29 @@ impl AgentSession for PiAdapter {
         })
     }
 
-    fn start(&mut self) -> Result<(), ProviderError> {
+    async fn start(&mut self) -> Result<(), ProviderError> {
         // Pi is spawned lazily per turn; nothing to start up front.
         Ok(())
     }
 
-    fn send_bootstrap(
+    async fn send_bootstrap(
         &mut self,
         message: BootstrapMessage,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
         // Store bootstrap content — it is passed inline as --append-system-prompt on
         // every turn. No model call is made here.
         self.bootstrap_content = Some(message.content);
-        Ok(Box::new(std::iter::once(Ok(OutputChunk::Done))))
+        Ok(Box::new(VecOutputStream::done()))
     }
 
-    fn send_step(
+    async fn send_step(
         &mut self,
         message: StepMessage,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
-        self.spawn_turn(&format_step_message(&message))
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
+        self.spawn_turn(&format_step_message(&message)).await
     }
 
-    fn close(&mut self) -> Result<(), ProviderError> {
+    async fn close(&mut self) -> Result<(), ProviderError> {
         // Each turn is a short-lived process that has already exited; nothing
         // long-lived to tear down.
         tracing::info!("closing pi session");
@@ -276,12 +283,14 @@ impl AgentSession for PiAdapter {
     }
 }
 
-/// Iterator that reads one turn of streamed output from a pi subprocess.
+/// Stream that reads one turn of streamed output from a pi subprocess.
 ///
 /// Parses JSONL from stdout, emitting `OutputChunk::Text` for streamed text
 /// deltas and `OutputChunk::Done` once the turn finishes. Provider errors are
 /// surfaced via the `errorMessage`/`stopReason` fields on turn/message events.
-struct PiTurnIterator {
+/// The subprocess is spawned with `kill_on_drop`, so abandoning the stream
+/// mid-turn (step timeout, Ctrl+C) cannot leak a lingering pi process.
+struct PiTurnStream {
     child: Child,
     reader: BufReader<ChildStdout>,
     verbose: bool,
@@ -293,67 +302,45 @@ struct PiTurnIterator {
 /// logically completed, before force-killing it.
 const TURN_EXIT_GRACE: Duration = Duration::from_secs(2);
 
-impl PiTurnIterator {
+impl PiTurnStream {
     /// Reap the turn subprocess after the turn has logically completed.
     ///
     /// pi 0.80.x keeps the `--print` process alive after emitting the terminal
-    /// `agent_end` event (issue #48), so a plain blocking `wait()` here hangs
+    /// `agent_end` event (issue #48), so waiting without a bound here hangs
     /// until the step timeout fires. The turn is semantically finished once
     /// `agent_end` arrives (the session transcript is already flushed), so
     /// give the process a short grace period to exit cleanly, then kill it.
     ///
     /// Returns the exit status if the process exited on its own, or `None` if
     /// it had to be killed.
-    fn reap_child(&mut self) -> Option<ExitStatus> {
-        let deadline = Instant::now() + TURN_EXIT_GRACE;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => return Some(status),
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(_) => break,
-            }
+    async fn reap_child(&mut self) -> Option<ExitStatus> {
+        if let Ok(Ok(status)) = tokio::time::timeout(TURN_EXIT_GRACE, self.child.wait()).await {
+            return Some(status);
         }
         tracing::debug!("pi turn process still alive after turn completion; killing it");
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.child.start_kill();
+        let _ = self.child.wait().await;
         None
     }
 }
 
-impl Drop for PiTurnIterator {
-    fn drop(&mut self) {
-        // If the iterator is abandoned mid-turn (e.g. step timeout or Ctrl+C),
-        // make sure the pi subprocess doesn't linger.
-        if let Ok(None) = self.child.try_wait() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
-
-impl Iterator for PiTurnIterator {
-    type Item = Result<OutputChunk, ProviderError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+#[async_trait]
+impl OutputStream for PiTurnStream {
+    async fn next_chunk(&mut self) -> Option<Result<OutputChunk, ProviderError>> {
         if self.done {
             return None;
         }
 
         loop {
             let mut line = String::new();
-            match self.reader.read_line(&mut line) {
+            match self.reader.read_line(&mut line).await {
                 Ok(0) => {
                     // EOF — the turn's output stream is finished. The process
                     // has usually exited, but don't block forever if it hasn't
                     // (pi 0.80.x can keep running after closing stdout).
                     self.done = true;
 
-                    let status = self.reap_child();
+                    let status = self.reap_child().await;
 
                     if let Some(message) = self.latest_error.take() {
                         return Some(Err(ProviderError::StreamError(message)));
@@ -440,7 +427,7 @@ impl Iterator for PiTurnIterator {
                             if let Some(message) = self.latest_error.take() {
                                 return Some(Err(ProviderError::StreamError(message)));
                             }
-                            let _ = self.reap_child();
+                            let _ = self.reap_child().await;
                             return Some(Ok(OutputChunk::Done));
                         }
                         _ => continue,
@@ -465,6 +452,7 @@ mod tests {
     use indexmap::IndexMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
 
     fn test_config() -> Config {
         Config {
@@ -593,11 +581,11 @@ exit 0
         }
     }
 
-    fn collect_output(
-        stream: Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>,
+    async fn collect_output(
+        mut stream: Box<dyn OutputStream + '_>,
     ) -> Result<String, ProviderError> {
         let mut output = String::new();
-        for item in stream {
+        while let Some(item) = stream.next_chunk().await {
             match item? {
                 OutputChunk::Text(text) => output.push_str(&text),
                 OutputChunk::Done => break,
@@ -606,8 +594,8 @@ exit 0
         Ok(output)
     }
 
-    #[test]
-    fn send_step_streams_text_deltas() {
+    #[tokio::test]
+    async fn send_step_streams_text_deltas() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
@@ -623,16 +611,18 @@ exit 0
                     source_file: "tests/login.test.toml".to_string(),
                     instruction: "Verify the login form works".to_string(),
                 })
+                .await
                 .unwrap(),
         )
+        .await
         .unwrap();
 
         assert_eq!(output, "RESULT: OK");
         assert_eq!(adapter.turn_index, 1);
     }
 
-    #[test]
-    fn send_step_completes_when_pi_process_lingers_after_agent_end() {
+    #[tokio::test]
+    async fn send_step_completes_when_pi_process_lingers_after_agent_end() {
         // Regression test for issue #48: pi 0.80.x keeps the --print process
         // alive after emitting agent_end. The adapter must still deliver Done
         // promptly instead of blocking in wait() until the step timeout.
@@ -652,8 +642,10 @@ exit 0
                     source_file: "tests/login.test.toml".to_string(),
                     instruction: "Verify the login form works".to_string(),
                 })
+                .await
                 .unwrap(),
         )
+        .await
         .unwrap();
 
         assert_eq!(output, "RESULT OK");
@@ -666,8 +658,8 @@ exit 0
         );
     }
 
-    #[test]
-    fn send_bootstrap_stores_content_without_calling_model() {
+    #[tokio::test]
+    async fn send_bootstrap_stores_content_without_calling_model() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
@@ -680,8 +672,10 @@ exit 0
                     session_id: SessionId("sess-1".to_string()),
                     content: "Harness instructions".to_string(),
                 })
+                .await
                 .unwrap(),
         )
+        .await
         .unwrap();
 
         assert_eq!(output, "");
@@ -692,8 +686,8 @@ exit 0
         assert_eq!(adapter.turn_index, 0);
     }
 
-    #[test]
-    fn bootstrap_file_written_on_first_turn() {
+    #[tokio::test]
+    async fn bootstrap_file_written_on_first_turn() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
@@ -710,8 +704,10 @@ exit 0
                     source_file: "tests/x.test.toml".to_string(),
                     instruction: "do it".to_string(),
                 })
+                .await
                 .unwrap(),
         )
+        .await
         .unwrap();
 
         let bootstrap_file = artifact_dir.join("pi_bootstrap_prompt.txt");
@@ -722,8 +718,8 @@ exit 0
         );
     }
 
-    #[test]
-    fn bootstrap_passed_as_content_with_base_system_prompt() {
+    #[tokio::test]
+    async fn bootstrap_passed_as_content_with_base_system_prompt() {
         // Regression for issue #47: pi must receive the bootstrap *content*
         // (carrying the RESULT-marker protocol) via --append-system-prompt,
         // alongside an explicit base --system-prompt so the appended protocol
@@ -748,8 +744,10 @@ exit 0
                     source_file: "tests/x.test.toml".to_string(),
                     instruction: "do it".to_string(),
                 })
+                .await
                 .unwrap(),
         )
+        .await
         .unwrap();
 
         let recorded = fs::read_to_string(&args_out).unwrap();
@@ -796,8 +794,8 @@ exit 0
         );
     }
 
-    #[test]
-    fn error_event_surfaces_stream_error() {
+    #[tokio::test]
+    async fn error_event_surfaces_stream_error() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
@@ -813,8 +811,10 @@ exit 0
                     source_file: "tests/x.test.toml".to_string(),
                     instruction: "do it".to_string(),
                 })
+                .await
                 .unwrap(),
-        );
+        )
+        .await;
 
         assert!(
             matches!(result, Err(ProviderError::StreamError(ref msg)) if msg == "model not found"),

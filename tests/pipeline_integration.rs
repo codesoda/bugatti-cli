@@ -12,7 +12,10 @@ use bugatti::diagnostics;
 use bugatti::executor::{self, RunOutcome, StepOutcome, StepResult, StepVerdict};
 use bugatti::exit_code;
 use bugatti::expand;
-use bugatti::provider::{AgentSession, BootstrapMessage, OutputChunk, ProviderError, StepMessage};
+use bugatti::provider::{
+    AgentSession, BootstrapMessage, OutputChunk, OutputStream, ProviderError, StepMessage,
+    VecOutputStream,
+};
 use bugatti::report::{self, ReportInput};
 use bugatti::run::{self, EffectiveConfigSummary};
 use bugatti::test_file;
@@ -41,6 +44,7 @@ impl MockProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentSession for MockProvider {
     fn initialize(
         _config: &Config,
@@ -53,53 +57,45 @@ impl AgentSession for MockProvider {
         Ok(Self::with_ok_responses(0))
     }
 
-    fn start(&mut self) -> Result<(), ProviderError> {
+    async fn start(&mut self) -> Result<(), ProviderError> {
         Ok(())
     }
 
-    fn send_bootstrap(
+    async fn send_bootstrap(
         &mut self,
         _message: BootstrapMessage,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
-        Ok(Box::new(
-            vec![
-                Ok(OutputChunk::Text("Bootstrap acknowledged.\n".to_string())),
-                Ok(OutputChunk::Done),
-            ]
-            .into_iter(),
-        ))
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
+        Ok(Box::new(VecOutputStream::new(vec![
+            Ok(OutputChunk::Text("Bootstrap acknowledged.\n".to_string())),
+            Ok(OutputChunk::Done),
+        ])))
     }
 
-    fn send_step(
+    async fn send_step(
         &mut self,
         _message: StepMessage,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
         if self.call_count < self.responses.len() {
             let idx = self.call_count;
             self.call_count += 1;
-            Ok(Box::new(self.responses[idx].clone().into_iter()))
+            Ok(Box::new(VecOutputStream::new(self.responses[idx].clone())))
         } else {
-            Ok(Box::new(
-                vec![
-                    Ok(OutputChunk::Text("RESULT OK\n".to_string())),
-                    Ok(OutputChunk::Done),
-                ]
-                .into_iter(),
-            ))
+            Ok(Box::new(VecOutputStream::new(vec![
+                Ok(OutputChunk::Text("RESULT OK\n".to_string())),
+                Ok(OutputChunk::Done),
+            ])))
         }
     }
 
-    fn close(&mut self) -> Result<(), ProviderError> {
+    async fn close(&mut self) -> Result<(), ProviderError> {
         Ok(())
     }
 }
 
 /// Test the full pipeline with a mock provider: config -> parse -> expand ->
 /// artifacts -> execution -> report -> exit code.
-#[test]
-fn full_pipeline_with_mock_provider() {
+#[tokio::test]
+async fn full_pipeline_with_mock_provider() {
     let tmp = tempfile::tempdir().unwrap();
     let project_root = tmp.path();
 
@@ -154,7 +150,7 @@ instruction = "Verify the login form is present"
 
     // Phase 10: Mock provider
     let mut session = MockProvider::with_ok_responses(2);
-    session.start().unwrap();
+    session.start().await.unwrap();
 
     // Phase 11: Execute steps
     let outcome = executor::execute_steps(
@@ -169,6 +165,7 @@ instruction = "Verify the login form is present"
         std::path::Path::new("."),
         &std::sync::atomic::AtomicBool::new(false),
     )
+    .await
     .unwrap();
 
     assert!(outcome.all_passed);
@@ -178,7 +175,7 @@ instruction = "Verify the login form is present"
     }
 
     // Phase 12: Close session
-    session.close().unwrap();
+    session.close().await.unwrap();
 
     // Phase 13: Write report
     let start_time = chrono::Utc::now();
@@ -266,8 +263,8 @@ include_path = "{}"
 }
 
 /// Test pipeline with a step that returns ERROR.
-#[test]
-fn pipeline_with_error_step_exits_nonzero() {
+#[tokio::test]
+async fn pipeline_with_error_step_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
     let project_root = tmp.path();
 
@@ -298,7 +295,7 @@ instruction = "This step will fail"
         ]],
         call_count: 0,
     };
-    session.start().unwrap();
+    session.start().await.unwrap();
 
     let outcome = executor::execute_steps(
         &mut session,
@@ -312,6 +309,7 @@ instruction = "This step will fail"
         std::path::Path::new("."),
         &std::sync::atomic::AtomicBool::new(false),
     )
+    .await
     .unwrap();
 
     assert!(!outcome.all_passed);

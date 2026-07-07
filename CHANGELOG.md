@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Provider sessions, command execution, and the update checker now use Tokio async I/O. Step and teardown timeouts are enforced while waiting for each streamed chunk, and `pi`/`codex` subprocesses are killed on drop so abandoned turns don't linger.
+
 ## [0.6.0] - 2026-07-07
 
 ### Added

@@ -73,8 +73,8 @@ struct ReleaseMetadata {
 /// Sends a GET to the releases/latest URL with redirect following disabled.
 /// GitHub returns a 302 with `Location: .../releases/tag/v0.4.1` — we extract
 /// the tag from that header. One request, unlimited rate, no API token.
-fn discover_latest_tag(url: &str, timeout: Duration) -> Result<String, String> {
-    let client = reqwest::blocking::Client::builder()
+async fn discover_latest_tag(url: &str, timeout: Duration) -> Result<String, String> {
+    let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
@@ -84,6 +84,7 @@ fn discover_latest_tag(url: &str, timeout: Duration) -> Result<String, String> {
     let response = client
         .get(url)
         .send()
+        .await
         .map_err(|e| format!("failed to connect to release server: {e}"))?;
 
     let status = response.status();
@@ -135,8 +136,8 @@ fn repo_base_from_url(url: &str) -> &str {
 }
 
 /// Fetches release metadata from the given URL.
-fn check_latest_version(url: &str, timeout: Duration) -> Result<ReleaseMetadata, String> {
-    let tag = discover_latest_tag(url, timeout)?;
+async fn check_latest_version(url: &str, timeout: Duration) -> Result<ReleaseMetadata, String> {
+    let tag = discover_latest_tag(url, timeout).await?;
     let repo_base = repo_base_from_url(url);
     Ok(build_release_metadata(&tag, repo_base))
 }
@@ -146,8 +147,8 @@ fn check_latest_version(url: &str, timeout: Duration) -> Result<ReleaseMetadata,
 // ---------------------------------------------------------------------------
 
 /// Downloads a URL to a file in the given directory.
-fn download_to_file(url: &str, dest_dir: &Path, filename: &str) -> Result<PathBuf, String> {
-    let client = reqwest::blocking::Client::builder()
+async fn download_to_file(url: &str, dest_dir: &Path, filename: &str) -> Result<PathBuf, String> {
+    let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(120))
         .build()
@@ -156,6 +157,7 @@ fn download_to_file(url: &str, dest_dir: &Path, filename: &str) -> Result<PathBu
     let response = client
         .get(url)
         .send()
+        .await
         .map_err(|e| format!("failed to download '{filename}': {e}"))?;
 
     let status = response.status();
@@ -167,10 +169,13 @@ fn download_to_file(url: &str, dest_dir: &Path, filename: &str) -> Result<PathBu
 
     let bytes = response
         .bytes()
+        .await
         .map_err(|e| format!("failed to read response for '{filename}': {e}"))?;
 
     let dest_path = dest_dir.join(filename);
-    std::fs::write(&dest_path, &bytes).map_err(|e| format!("failed to write '{filename}': {e}"))?;
+    tokio::fs::write(&dest_path, &bytes)
+        .await
+        .map_err(|e| format!("failed to write '{filename}': {e}"))?;
 
     Ok(dest_path)
 }
@@ -358,18 +363,18 @@ fn confirm_update(local: &str, remote: &str) -> bool {
 ///
 /// If `check` is true, only prints whether an update is available.
 /// Otherwise, downloads, verifies, extracts, and replaces the running binary.
-pub fn run_update(check: bool, yes: bool) -> Result<(), String> {
+pub async fn run_update(check: bool, yes: bool) -> Result<(), String> {
     if check {
-        return run_update_check();
+        return run_update_check().await;
     }
-    run_update_install(yes)
+    run_update_install(yes).await
 }
 
 /// Check-only: prints whether an update is available.
-fn run_update_check() -> Result<(), String> {
+async fn run_update_check() -> Result<(), String> {
     let local = current_version();
 
-    let release = match check_latest_version(GITHUB_RELEASES_LATEST_URL, REQUEST_TIMEOUT) {
+    let release = match check_latest_version(GITHUB_RELEASES_LATEST_URL, REQUEST_TIMEOUT).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Warning: unable to check for updates: {e}");
@@ -396,11 +401,12 @@ fn run_update_check() -> Result<(), String> {
 }
 
 /// Full install: download, verify, extract, secure, replace.
-fn run_update_install(yes: bool) -> Result<(), String> {
+async fn run_update_install(yes: bool) -> Result<(), String> {
     let local = current_version();
 
     // Step 1: Fetch release metadata
     let release = check_latest_version(GITHUB_RELEASES_LATEST_URL, REQUEST_TIMEOUT)
+        .await
         .map_err(|e| format!("failed to check for latest release: {e}"))?;
 
     let remote = normalize_version_tag(&release.tag);
@@ -428,6 +434,7 @@ fn run_update_install(yes: bool) -> Result<(), String> {
 
     let checksums_path =
         download_to_file(&release.checksums_url, tmp_dir.path(), CHECKSUMS_FILENAME)
+            .await
             .map_err(|e| format!("failed to download checksums: {e}"))?;
 
     let artifact_name = release
@@ -436,6 +443,7 @@ fn run_update_install(yes: bool) -> Result<(), String> {
         .next()
         .unwrap_or("artifact.tar.gz");
     let artifact_path = download_to_file(&release.artifact_url, tmp_dir.path(), artifact_name)
+        .await
         .map_err(|e| format!("failed to download release: {e}"))?;
 
     // Step 5: Verify checksum
@@ -537,14 +545,15 @@ fn format_update_notification(current: &str, latest: &str) -> String {
     format!("\nUpdate available: v{current} → v{latest} — run `bugatti update` to install")
 }
 
-/// Performs the passive version check (called on a background thread).
-fn passive_version_check() {
+/// Performs the passive version check.
+async fn passive_version_check() {
     if !should_check_for_update() {
         return;
     }
 
     // Always update timestamp after attempt (prevents retry storms)
-    let check_result = check_latest_version(GITHUB_RELEASES_LATEST_URL, PASSIVE_CHECK_TIMEOUT);
+    let check_result =
+        check_latest_version(GITHUB_RELEASES_LATEST_URL, PASSIVE_CHECK_TIMEOUT).await;
     write_last_check_timestamp();
 
     let release = match check_result {
@@ -560,13 +569,9 @@ fn passive_version_check() {
     }
 }
 
-/// Spawns the passive version check on a background thread with a timeout.
-///
-/// Waits at most 3 seconds for the check to complete. If it doesn't finish,
-/// the thread is abandoned (it dies when the process exits).
-pub fn spawn_passive_check() {
-    let handle = std::thread::spawn(passive_version_check);
-    let _ = handle.join(); // join will wait; the HTTP timeout (3s) is the real bound
+/// Runs the passive version check, bounded by the passive HTTP timeout (3s).
+pub async fn run_passive_check() {
+    passive_version_check().await;
 }
 
 // ---------------------------------------------------------------------------

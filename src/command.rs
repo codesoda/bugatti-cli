@@ -1,8 +1,9 @@
 use crate::config::{CommandDef, CommandKind, Config};
 use crate::run::ArtifactDir;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::process::{Child, Command};
 
 /// Result of executing a short-lived command.
 #[derive(Debug)]
@@ -131,7 +132,7 @@ pub fn validate_skip_readiness(
 /// If any command exits non-zero, execution stops and an error is returned.
 ///
 /// Returns a list of successful command results.
-pub fn run_short_lived_commands(
+pub async fn run_short_lived_commands(
     config: &Config,
     artifact_dir: &ArtifactDir,
     skip_cmds: &[String],
@@ -147,7 +148,7 @@ pub fn run_short_lived_commands(
             continue;
         }
 
-        let result = execute_short_lived(name, def, &artifact_dir.logs)?;
+        let result = execute_short_lived(name, def, &artifact_dir.logs).await?;
         println!(
             "OK ......... {name} (exit {})",
             result.exit_code.unwrap_or(-1)
@@ -159,7 +160,7 @@ pub fn run_short_lived_commands(
 }
 
 /// Execute a single short-lived command, capturing stdout and stderr to log files.
-fn execute_short_lived(
+async fn execute_short_lived(
     name: &str,
     def: &CommandDef,
     logs_dir: &Path,
@@ -171,6 +172,7 @@ fn execute_short_lived(
         .arg("-c")
         .arg(&def.cmd)
         .output()
+        .await
         .map_err(|e| CommandError::SpawnFailed {
             name: name.to_string(),
             cmd: def.cmd.clone(),
@@ -245,7 +247,7 @@ pub fn checkpoint_path(project_root: &Path, checkpoint_id: &str) -> PathBuf {
 const DEFAULT_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Run a checkpoint save or restore command with BUGATTI_CHECKPOINT_ID and BUGATTI_CHECKPOINT_PATH.
-pub fn run_checkpoint_command(
+pub async fn run_checkpoint_command(
     cmd: &str,
     checkpoint_id: &str,
     project_root: &Path,
@@ -263,56 +265,32 @@ pub fn run_checkpoint_command(
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_CHECKPOINT_TIMEOUT);
 
-    let mut child = Command::new("sh")
+    let child = Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .env("BUGATTI_CHECKPOINT_ID", checkpoint_id)
         .env("BUGATTI_CHECKPOINT_PATH", cp_path.display().to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Ensure the process is killed if we abandon it on timeout.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("failed to spawn checkpoint command: {e}"))?;
 
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = child
-                    .stdout
-                    .take()
-                    .map(|mut s| {
-                        let mut buf = Vec::new();
-                        std::io::Read::read_to_end(&mut s, &mut buf).ok();
-                        buf
-                    })
-                    .unwrap_or_default();
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|mut s| {
-                        let mut buf = Vec::new();
-                        std::io::Read::read_to_end(&mut s, &mut buf).ok();
-                        buf
-                    })
-                    .unwrap_or_default();
-
-                if !status.success() {
-                    print_output_tail("stderr", &stderr);
-                    print_output_tail("stdout", &stdout);
-                    return Err(format!("exited with code {}", status.code().unwrap_or(-1)));
-                }
-                return Ok(());
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                print_output_tail("stderr", &output.stderr);
+                print_output_tail("stdout", &output.stdout);
+                return Err(format!(
+                    "exited with code {}",
+                    output.status.code().unwrap_or(-1)
+                ));
             }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("timed out after {}s", timeout.as_secs()));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => return Err(format!("failed to wait for checkpoint command: {e}")),
+            Ok(())
         }
+        Ok(Err(e)) => Err(format!("failed to wait for checkpoint command: {e}")),
+        Err(_) => Err(format!("timed out after {}s", timeout.as_secs())),
     }
 }
 
@@ -355,7 +333,7 @@ pub struct TeardownResult {
 ///
 /// After spawning, if a readiness_url is configured, polls it until ready or timeout.
 /// Returns a list of tracked processes that must be torn down later.
-pub fn spawn_long_lived_commands(
+pub async fn spawn_long_lived_commands(
     config: &Config,
     artifact_dir: &ArtifactDir,
     skip_cmds: &[String],
@@ -378,9 +356,9 @@ pub fn spawn_long_lived_commands(
                     let timeout = readiness_timeout(def);
                     for url in &urls {
                         println!("WAIT ....... {name} (skipped): polling {url}");
-                        if let Err(e) = poll_readiness(url, timeout) {
+                        if let Err(e) = poll_readiness(url, timeout).await {
                             println!("FAIL ....... {name} (skipped): readiness check failed");
-                            teardown_processes(&mut tracked);
+                            teardown_processes(&mut tracked).await;
                             return Err(CommandError::ReadinessFailed {
                                 name: name.to_string(),
                                 url: url.to_string(),
@@ -438,10 +416,10 @@ pub fn spawn_long_lived_commands(
             let timeout = readiness_timeout(def);
             for url in &urls {
                 println!("WAIT ....... {name}: polling {url}");
-                if let Err(e) = poll_readiness(url, timeout) {
+                if let Err(e) = poll_readiness(url, timeout).await {
                     // Readiness failed - tear down what we've started
                     println!("FAIL ....... {name}: readiness check failed");
-                    teardown_processes(&mut tracked);
+                    teardown_processes(&mut tracked).await;
                     return Err(CommandError::ReadinessFailed {
                         name: name.to_string(),
                         url: url.to_string(),
@@ -464,7 +442,7 @@ fn readiness_timeout(def: &CommandDef) -> Duration {
 }
 
 /// Poll a readiness URL until it responds with a success status or timeout.
-fn poll_readiness(url: &str, timeout: Duration) -> Result<(), String> {
+async fn poll_readiness(url: &str, timeout: Duration) -> Result<(), String> {
     tracing::info!(
         url = url,
         timeout_secs = timeout.as_secs(),
@@ -474,7 +452,7 @@ fn poll_readiness(url: &str, timeout: Duration) -> Result<(), String> {
 
     while start.elapsed() < timeout {
         // Try a simple TCP connection check by parsing the URL and connecting
-        if check_url(url) {
+        if check_url(url).await {
             tracing::info!(
                 url = url,
                 elapsed_ms = start.elapsed().as_millis() as u64,
@@ -482,7 +460,7 @@ fn poll_readiness(url: &str, timeout: Duration) -> Result<(), String> {
             );
             return Ok(());
         }
-        std::thread::sleep(READINESS_POLL_INTERVAL);
+        tokio::time::sleep(READINESS_POLL_INTERVAL).await;
     }
 
     tracing::error!(
@@ -497,12 +475,13 @@ fn poll_readiness(url: &str, timeout: Duration) -> Result<(), String> {
 }
 
 /// Check if a URL is reachable by attempting a simple HTTP GET via a spawned curl process.
-fn check_url(url: &str) -> bool {
+async fn check_url(url: &str) -> bool {
     Command::new("curl")
         .args(["-sf", "--max-time", "2", "-o", "/dev/null", url])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
+        .await
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -522,12 +501,12 @@ pub fn check_for_unexpected_exits(
 
 /// Tear down all tracked long-lived processes by sending SIGTERM.
 /// Returns results describing the outcome for each process.
-pub fn teardown_processes(processes: &mut [TrackedProcess]) -> Vec<TeardownResult> {
+pub async fn teardown_processes(processes: &mut [TrackedProcess]) -> Vec<TeardownResult> {
     tracing::info!(count = processes.len(), "tearing down long-lived processes");
     let mut results = Vec::new();
 
     for process in processes.iter_mut() {
-        let result = teardown_single(process);
+        let result = teardown_single(process).await;
         tracing::info!(
             command = result.name.as_str(),
             success = result.success,
@@ -541,7 +520,7 @@ pub fn teardown_processes(processes: &mut [TrackedProcess]) -> Vec<TeardownResul
 }
 
 /// Tear down a single process with SIGTERM, waiting briefly for exit.
-fn teardown_single(process: &mut TrackedProcess) -> TeardownResult {
+async fn teardown_single(process: &mut TrackedProcess) -> TeardownResult {
     let name = process.name.clone();
 
     // Check if already exited
@@ -566,45 +545,37 @@ fn teardown_single(process: &mut TrackedProcess) -> TeardownResult {
     // Send SIGTERM
     #[cfg(unix)]
     {
-        unsafe {
-            libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM);
+        if let Some(pid) = process.child.id() {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = process.child.kill();
+        let _ = process.child.start_kill();
     }
 
     // Wait briefly for orderly shutdown
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match process.child.try_wait() {
-            Ok(Some(status)) => {
-                return TeardownResult {
-                    name,
-                    success: true,
-                    message: format!("terminated with code {}", status.code().unwrap_or(-1)),
-                };
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    // Force kill after timeout
-                    let _ = process.child.kill();
-                    let _ = process.child.wait();
-                    return TeardownResult {
-                        name,
-                        success: false,
-                        message: "did not exit after SIGTERM; force killed".to_string(),
-                    };
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => {
-                return TeardownResult {
-                    name,
-                    success: false,
-                    message: format!("error waiting for process: {e}"),
-                };
+    match tokio::time::timeout(Duration::from_secs(5), process.child.wait()).await {
+        Ok(Ok(status)) => TeardownResult {
+            name,
+            success: true,
+            message: format!("terminated with code {}", status.code().unwrap_or(-1)),
+        },
+        Ok(Err(e)) => TeardownResult {
+            name,
+            success: false,
+            message: format!("error waiting for process: {e}"),
+        },
+        Err(_) => {
+            // Force kill after timeout
+            let _ = process.child.start_kill();
+            let _ = process.child.wait().await;
+            TeardownResult {
+                name,
+                success: false,
+                message: "did not exit after SIGTERM; force killed".to_string(),
             }
         }
     }
@@ -649,8 +620,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn successful_short_lived_command() {
+    #[tokio::test]
+    async fn successful_short_lived_command() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -658,7 +629,9 @@ mod tests {
 
         let config = make_config(vec![("echo_test", CommandKind::ShortLived, "echo hello")]);
 
-        let results = run_short_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        let results = run_short_lived_commands(&config, &artifact_dir, &[])
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "echo_test");
         assert_eq!(results[0].exit_code, Some(0));
@@ -671,8 +644,8 @@ mod tests {
         assert!(std::path::Path::new(&results[0].stderr_path).exists());
     }
 
-    #[test]
-    fn failed_short_lived_command() {
+    #[tokio::test]
+    async fn failed_short_lived_command() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -680,7 +653,9 @@ mod tests {
 
         let config = make_config(vec![("fail_cmd", CommandKind::ShortLived, "exit 42")]);
 
-        let err = run_short_lived_commands(&config, &artifact_dir, &[]).unwrap_err();
+        let err = run_short_lived_commands(&config, &artifact_dir, &[])
+            .await
+            .unwrap_err();
         match err {
             CommandError::NonZeroExit {
                 name, exit_code, ..
@@ -692,8 +667,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn output_capture_to_log_files() {
+    #[tokio::test]
+    async fn output_capture_to_log_files() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -705,7 +680,9 @@ mod tests {
             "echo stdout_msg && echo stderr_msg >&2",
         )]);
 
-        let results = run_short_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        let results = run_short_lived_commands(&config, &artifact_dir, &[])
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
 
         let stdout = std::fs::read_to_string(&results[0].stdout_path).unwrap();
@@ -715,8 +692,8 @@ mod tests {
         assert!(stderr.contains("stderr_msg"));
     }
 
-    #[test]
-    fn long_lived_commands_are_skipped() {
+    #[tokio::test]
+    async fn long_lived_commands_are_skipped() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -727,14 +704,16 @@ mod tests {
             ("server", CommandKind::LongLived, "echo server"),
         ]);
 
-        let results = run_short_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        let results = run_short_lived_commands(&config, &artifact_dir, &[])
+            .await
+            .unwrap();
         // Only the short-lived command should have run
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "setup");
     }
 
-    #[test]
-    fn skip_cmd_flag_excludes_command() {
+    #[tokio::test]
+    async fn skip_cmd_flag_excludes_command() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -745,14 +724,15 @@ mod tests {
             ("seed", CommandKind::ShortLived, "echo seed"),
         ]);
 
-        let results =
-            run_short_lived_commands(&config, &artifact_dir, &["migrate".to_string()]).unwrap();
+        let results = run_short_lived_commands(&config, &artifact_dir, &["migrate".to_string()])
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "seed");
     }
 
-    #[test]
-    fn failed_command_stops_execution() {
+    #[tokio::test]
+    async fn failed_command_stops_execution() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -764,7 +744,9 @@ mod tests {
             ("b_second", CommandKind::ShortLived, "echo should_not_run"),
         ]);
 
-        let err = run_short_lived_commands(&config, &artifact_dir, &[]).unwrap_err();
+        let err = run_short_lived_commands(&config, &artifact_dir, &[])
+            .await
+            .unwrap_err();
         match err {
             CommandError::NonZeroExit { name, .. } => {
                 assert_eq!(name, "a_first");
@@ -779,8 +761,8 @@ mod tests {
 
     // --- Long-lived command tests ---
 
-    #[test]
-    fn spawn_long_lived_captures_output() {
+    #[tokio::test]
+    async fn spawn_long_lived_captures_output() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -793,12 +775,14 @@ mod tests {
             "echo long_lived_output && sleep 60",
         )]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[]).unwrap();
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[])
+            .await
+            .unwrap();
         assert_eq!(tracked.len(), 1);
         assert_eq!(tracked[0].name, "worker");
 
         // Give it a moment to write output
-        std::thread::sleep(Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Verify log files exist
         assert!(std::path::Path::new(&tracked[0].stdout_path).exists());
@@ -809,11 +793,11 @@ mod tests {
         assert!(stdout.contains("long_lived_output"), "stdout: {stdout}");
 
         // Clean up
-        teardown_processes(&mut tracked);
+        teardown_processes(&mut tracked).await;
     }
 
-    #[test]
-    fn spawn_long_lived_skip() {
+    #[tokio::test]
+    async fn spawn_long_lived_skip() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -826,15 +810,16 @@ mod tests {
 
         let mut tracked =
             spawn_long_lived_commands(&config, &artifact_dir, &["server".to_string()], &[])
+                .await
                 .unwrap();
         assert_eq!(tracked.len(), 1);
         assert_eq!(tracked[0].name, "worker");
 
-        teardown_processes(&mut tracked);
+        teardown_processes(&mut tracked).await;
     }
 
-    #[test]
-    fn teardown_stops_running_processes() {
+    #[tokio::test]
+    async fn teardown_stops_running_processes() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -842,10 +827,12 @@ mod tests {
 
         let config = make_config(vec![("sleeper", CommandKind::LongLived, "sleep 600")]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[]).unwrap();
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[])
+            .await
+            .unwrap();
         assert_eq!(tracked.len(), 1);
 
-        let results = teardown_processes(&mut tracked);
+        let results = teardown_processes(&mut tracked).await;
         assert_eq!(results.len(), 1);
         assert!(
             results[0].success,
@@ -854,8 +841,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn detect_unexpected_exit() {
+    #[tokio::test]
+    async fn detect_unexpected_exit() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -864,10 +851,12 @@ mod tests {
         // Command that exits immediately
         let config = make_config(vec![("quick_exit", CommandKind::LongLived, "exit 1")]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[]).unwrap();
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[])
+            .await
+            .unwrap();
 
         // Wait for it to exit
-        std::thread::sleep(Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         let result = check_for_unexpected_exits(&mut tracked);
         assert!(result.is_some(), "should detect unexpected exit");
@@ -944,8 +933,8 @@ mod tests {
         assert!(err.contains("not a known command"), "error: {err}");
     }
 
-    #[test]
-    fn spawn_long_lived_skip_readiness() {
+    #[tokio::test]
+    async fn spawn_long_lived_skip_readiness() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -966,14 +955,15 @@ mod tests {
             &["server".to_string()],
             &["server".to_string()],
         )
+        .await
         .unwrap();
 
         // No processes spawned (command was skipped), and no readiness error
         assert!(tracked.is_empty());
     }
 
-    #[test]
-    fn short_lived_not_spawned_as_long_lived() {
+    #[tokio::test]
+    async fn short_lived_not_spawned_as_long_lived() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -984,16 +974,18 @@ mod tests {
             ("server", CommandKind::LongLived, "sleep 60"),
         ]);
 
-        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[]).unwrap();
+        let mut tracked = spawn_long_lived_commands(&config, &artifact_dir, &[], &[])
+            .await
+            .unwrap();
         // Only long-lived should be spawned
         assert_eq!(tracked.len(), 1);
         assert_eq!(tracked[0].name, "server");
 
-        teardown_processes(&mut tracked);
+        teardown_processes(&mut tracked).await;
     }
 
-    #[test]
-    fn commands_execute_in_declaration_order() {
+    #[tokio::test]
+    async fn commands_execute_in_declaration_order() {
         let tmp = tempfile::tempdir().unwrap();
         let run_id = RunId("test-run".to_string());
         let artifact_dir = ArtifactDir::from_run_id(tmp.path(), &run_id);
@@ -1007,7 +999,9 @@ mod tests {
             ("a_first", CommandKind::ShortLived, "echo a_first"),
         ]);
 
-        let results = run_short_lived_commands(&config, &artifact_dir, &[]).unwrap();
+        let results = run_short_lived_commands(&config, &artifact_dir, &[])
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].name, "z_last");
         assert_eq!(results[1].name, "a_first");

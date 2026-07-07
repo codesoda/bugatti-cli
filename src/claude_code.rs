@@ -1,10 +1,15 @@
 use crate::config::Config;
 use crate::output;
-use crate::provider::{AgentSession, BootstrapMessage, OutputChunk, ProviderError, StepMessage};
+use crate::provider::{
+    AgentSession, BootstrapMessage, OutputChunk, OutputStream, ProviderError, StepMessage,
+    VecOutputStream,
+};
+use async_trait::async_trait;
 use serde::Deserialize;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, Command};
 
 /// Claude Code CLI provider adapter.
 ///
@@ -28,7 +33,7 @@ pub struct ClaudeCodeAdapter {
     /// Stdin handle for sending messages.
     stdin: Option<ChildStdin>,
     /// Buffered reader for stdout.
-    reader: Option<BufReader<std::process::ChildStdout>>,
+    reader: Option<BufReader<tokio::process::ChildStdout>>,
 }
 
 /// Format a step message with metadata prefix for sending to the provider.
@@ -147,6 +152,7 @@ impl ClaudeCodeAdapter {
         if self.verbose {
             let c = output::stderr_colors();
             let args: Vec<_> = cmd
+                .as_std()
                 .get_args()
                 .map(|a| a.to_string_lossy().to_string())
                 .collect();
@@ -163,7 +169,7 @@ impl ClaudeCodeAdapter {
             eprintln!(
                 "{}         binary: {}{}",
                 c.dim,
-                cmd.get_program().to_string_lossy(),
+                cmd.as_std().get_program().to_string_lossy(),
                 c.reset
             );
         }
@@ -189,12 +195,11 @@ impl ClaudeCodeAdapter {
         Ok(())
     }
 
-    /// Send a message to the long-lived process and return a streaming iterator.
-    fn send_message(
+    /// Send a message to the long-lived process and return a streaming output stream.
+    async fn send_message(
         &mut self,
         message: &str,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
         self.ensure_started()?;
 
         let stdin = self
@@ -220,12 +225,15 @@ impl ClaudeCodeAdapter {
 
         stdin
             .write_all(input_line.as_bytes())
+            .await
             .map_err(|e| ProviderError::SendFailed(format!("failed to write to stdin: {e}")))?;
         stdin
             .write_all(b"\n")
+            .await
             .map_err(|e| ProviderError::SendFailed(format!("failed to write newline: {e}")))?;
         stdin
             .flush()
+            .await
             .map_err(|e| ProviderError::SendFailed(format!("failed to flush stdin: {e}")))?;
 
         let reader = self
@@ -233,7 +241,7 @@ impl ClaudeCodeAdapter {
             .as_mut()
             .ok_or_else(|| ProviderError::SendFailed("stdout reader not available".to_string()))?;
 
-        Ok(Box::new(StreamTurnIterator {
+        Ok(Box::new(StreamTurnStream {
             reader,
             done: false,
             verbose: self.verbose,
@@ -246,6 +254,7 @@ impl ClaudeCodeAdapter {
     }
 }
 
+#[async_trait]
 impl AgentSession for ClaudeCodeAdapter {
     fn initialize(
         config: &Config,
@@ -274,37 +283,35 @@ impl AgentSession for ClaudeCodeAdapter {
         })
     }
 
-    fn start(&mut self) -> Result<(), ProviderError> {
+    async fn start(&mut self) -> Result<(), ProviderError> {
         // Process is spawned lazily on first send_step, after bootstrap content is available.
         tracing::info!("claude-code session ready (process will launch on first message)");
         Ok(())
     }
 
-    fn send_bootstrap(
+    async fn send_bootstrap(
         &mut self,
         message: BootstrapMessage,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
         // Store bootstrap content — it will be passed as --append-system-prompt at launch.
         // If the process is already running, send as a regular message (shouldn't happen in normal flow).
         if self.child.is_some() {
-            return self.send_message(&message.content);
+            return self.send_message(&message.content).await;
         }
         self.bootstrap_content = Some(message.content);
-        // Return an empty iterator since no API call is made
-        Ok(Box::new(std::iter::once(Ok(OutputChunk::Done))))
+        // Return a single Done chunk since no API call is made
+        Ok(Box::new(VecOutputStream::done()))
     }
 
-    fn send_step(
+    async fn send_step(
         &mut self,
         message: StepMessage,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
         let formatted = format_step_message(&message);
-        self.send_message(&formatted)
+        self.send_message(&formatted).await
     }
 
-    fn close(&mut self) -> Result<(), ProviderError> {
+    async fn close(&mut self) -> Result<(), ProviderError> {
         tracing::info!("closing claude-code session");
 
         // Drop stdin to signal EOF — the process will exit
@@ -312,7 +319,7 @@ impl AgentSession for ClaudeCodeAdapter {
         self.reader.take();
 
         if let Some(mut child) = self.child.take() {
-            match child.wait() {
+            match child.wait().await {
                 Ok(status) => {
                     tracing::info!(exit_status = %status, "claude process exited");
                 }
@@ -326,22 +333,21 @@ impl AgentSession for ClaudeCodeAdapter {
     }
 }
 
-/// Iterator that reads one turn of streamed output from the long-lived process.
+/// Stream that reads one turn of streamed output from the long-lived process.
 ///
 /// Reads JSONL from stdout, parsing each line into `OutputChunk` values.
 /// Yields `OutputChunk::Done` when a `result` event is received (turn complete).
 /// The process stays alive for the next message.
-struct StreamTurnIterator<'a> {
-    reader: &'a mut BufReader<std::process::ChildStdout>,
+struct StreamTurnStream<'a> {
+    reader: &'a mut BufReader<tokio::process::ChildStdout>,
     done: bool,
     verbose: bool,
     colors: Option<&'static output::Colors>,
 }
 
-impl<'a> Iterator for StreamTurnIterator<'a> {
-    type Item = Result<OutputChunk, ProviderError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+#[async_trait]
+impl<'a> OutputStream for StreamTurnStream<'a> {
+    async fn next_chunk(&mut self) -> Option<Result<OutputChunk, ProviderError>> {
         if self.done {
             return None;
         }
@@ -350,7 +356,7 @@ impl<'a> Iterator for StreamTurnIterator<'a> {
 
         loop {
             let mut line = String::new();
-            match self.reader.read_line(&mut line) {
+            match self.reader.read_line(&mut line).await {
                 Ok(0) => {
                     // EOF — process exited unexpectedly
                     self.done = true;
@@ -541,8 +547,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn send_message_fails_with_bad_binary() {
+    #[tokio::test]
+    async fn send_message_fails_with_bad_binary() {
         let mut adapter = ClaudeCodeAdapter {
             binary_path: PathBuf::from("/nonexistent/claude"),
             agent_args: vec![],
@@ -554,12 +560,12 @@ mod tests {
             bootstrap_content: None,
         };
 
-        let result = adapter.send_message("hello");
+        let result = adapter.send_message("hello").await;
         assert!(result.is_err(), "expected error with nonexistent binary");
     }
 
-    #[test]
-    fn close_cleans_up_handles() {
+    #[tokio::test]
+    async fn close_cleans_up_handles() {
         let mut adapter = ClaudeCodeAdapter {
             binary_path: PathBuf::from("/usr/bin/claude"),
             agent_args: vec![],
@@ -572,7 +578,7 @@ mod tests {
         };
 
         // Close with no process should succeed
-        adapter.close().unwrap();
+        adapter.close().await.unwrap();
         assert!(adapter.child.is_none());
         assert!(adapter.stdin.is_none());
         assert!(adapter.reader.is_none());
@@ -621,8 +627,8 @@ mod tests {
         assert_eq!(parsed["message"]["content"], "line1\nline2");
     }
 
-    #[test]
-    fn stream_turn_iterator_with_mock_process() {
+    #[tokio::test]
+    async fn stream_turn_stream_with_mock_process() {
         // Simulate stdout with assistant + result events
         let mut child = Command::new("sh")
             .arg("-c")
@@ -637,17 +643,17 @@ mod tests {
 
         // Skip system init
         let mut init_line = String::new();
-        reader.read_line(&mut init_line).unwrap();
+        reader.read_line(&mut init_line).await.unwrap();
 
-        let mut iter = StreamTurnIterator {
-            reader: unsafe { &mut *(&mut reader as *mut BufReader<std::process::ChildStdout>) },
+        let mut stream = StreamTurnStream {
+            reader: &mut reader,
             done: false,
             verbose: false,
             colors: None,
         };
 
         let mut collected = Vec::new();
-        for item in &mut iter {
+        while let Some(item) = stream.next_chunk().await {
             match item {
                 Ok(OutputChunk::Text(text)) => collected.push(text),
                 Ok(OutputChunk::Done) => break,
@@ -656,11 +662,11 @@ mod tests {
         }
 
         assert_eq!(collected, vec!["Hello"]);
-        let _ = child.wait();
+        let _ = child.wait().await;
     }
 
-    #[test]
-    fn stream_turn_iterator_reports_error_events() {
+    #[tokio::test]
+    async fn stream_turn_stream_reports_error_events() {
         let mut child = Command::new("sh")
             .arg("-c")
             .arg(r#"echo '{"type":"error","error":"something went wrong"}'"#)
@@ -672,25 +678,25 @@ mod tests {
         let stdout = child.stdout.take().unwrap();
         let mut reader = BufReader::new(stdout);
 
-        let mut iter = StreamTurnIterator {
-            reader: unsafe { &mut *(&mut reader as *mut BufReader<std::process::ChildStdout>) },
+        let mut stream = StreamTurnStream {
+            reader: &mut reader,
             done: false,
             verbose: false,
             colors: None,
         };
 
-        let result = iter.next();
+        let result = stream.next_chunk().await;
         assert!(result.is_some());
         let item = result.unwrap();
         assert!(
             matches!(item, Err(ProviderError::StreamError(ref msg)) if msg == "something went wrong"),
             "expected StreamError, got: {item:?}"
         );
-        let _ = child.wait();
+        let _ = child.wait().await;
     }
 
-    #[test]
-    fn stream_turn_iterator_skips_non_json_lines() {
+    #[tokio::test]
+    async fn stream_turn_stream_skips_non_json_lines() {
         let mut child = Command::new("sh")
             .arg("-c")
             .arg(r#"echo 'not json'; echo '{"type":"assistant","message":{"content":[{"type":"text","text":"text"}]}}'; echo '{"type":"result","result":"text","subtype":"success"}';"#)
@@ -702,15 +708,15 @@ mod tests {
         let stdout = child.stdout.take().unwrap();
         let mut reader = BufReader::new(stdout);
 
-        let mut iter = StreamTurnIterator {
-            reader: unsafe { &mut *(&mut reader as *mut BufReader<std::process::ChildStdout>) },
+        let mut stream = StreamTurnStream {
+            reader: &mut reader,
             done: false,
             verbose: false,
             colors: None,
         };
 
         let mut texts = Vec::new();
-        for item in &mut iter {
+        while let Some(item) = stream.next_chunk().await {
             match item {
                 Ok(OutputChunk::Text(t)) => texts.push(t),
                 Ok(OutputChunk::Done) => break,
@@ -719,7 +725,7 @@ mod tests {
         }
 
         assert_eq!(texts, vec!["text"]);
-        let _ = child.wait();
+        let _ = child.wait().await;
     }
 
     #[test]

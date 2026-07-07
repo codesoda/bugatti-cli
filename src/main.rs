@@ -120,7 +120,8 @@ struct TestRunResult {
     error: Option<String>,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Install Ctrl+C handler for graceful interruption.
     // The handler sets a flag; the run loop checks it between steps.
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -149,7 +150,7 @@ fn main() {
     let is_update_command = matches!(&cli.command, Commands::Update { .. });
 
     let code = match cli.command {
-        Commands::Update { check, yes } => match bugatti::update::run_update(check, yes) {
+        Commands::Update { check, yes } => match bugatti::update::run_update(check, yes).await {
             Ok(()) => EXIT_OK,
             Err(e) => {
                 eprintln!("ERROR: {e}");
@@ -186,7 +187,8 @@ fn main() {
                             from_checkpoint.as_deref(),
                             verbose,
                             explicit_config.as_deref(),
-                        );
+                        )
+                        .await;
                         // Print run reference for single-file mode
                         if let Some(run_id) = &result.run_id {
                             println!("\nRun ID: {run_id}");
@@ -216,22 +218,25 @@ fn main() {
                         EXIT_CONFIG_ERROR
                     }
                 },
-                None => run_discovery(
-                    &project_root,
-                    &skip_cmds,
-                    &skip_readiness,
-                    strict_warnings,
-                    from_checkpoint.as_deref(),
-                    verbose,
-                    explicit_config.as_deref(),
-                ),
+                None => {
+                    run_discovery(
+                        &project_root,
+                        &skip_cmds,
+                        &skip_readiness,
+                        strict_warnings,
+                        from_checkpoint.as_deref(),
+                        verbose,
+                        explicit_config.as_deref(),
+                    )
+                    .await
+                }
             }
         }
     };
 
-    // Passive background version check after successful runs
+    // Passive version check after successful runs
     if code == EXIT_OK && !is_update_command {
-        bugatti::update::spawn_passive_check();
+        bugatti::update::run_passive_check().await;
     }
 
     std::process::exit(code);
@@ -242,7 +247,7 @@ fn main() {
 /// Pipeline order: config load -> parse -> expand -> artifact setup -> command setup
 /// -> provider init -> step execution -> report -> teardown -> exit
 #[allow(clippy::too_many_arguments)]
-fn run_test_pipeline(
+async fn run_test_pipeline(
     project_root: &Path,
     test_path: &Path,
     skip_cmds: &[String],
@@ -369,7 +374,7 @@ fn run_test_pipeline(
         start_time: chrono::Utc::now(),
         verbose,
     };
-    run_test_with_artifacts(&ctx, steps)
+    run_test_with_artifacts(&ctx, steps).await
 }
 
 /// State shared across the pipeline after artifact setup.
@@ -392,13 +397,13 @@ struct PipelineContext<'a> {
 
 impl<'a> PipelineContext<'a> {
     /// Build a TestRunResult for a pre-execution failure, writing a best-effort report.
-    fn fail_early(
+    async fn fail_early(
         &self,
         exit_code: i32,
         error: String,
         tracked: &mut [TrackedProcess],
     ) -> TestRunResult {
-        command::teardown_processes(tracked);
+        command::teardown_processes(tracked).await;
         let end_time = chrono::Utc::now();
         let empty_outcome = executor::RunOutcome {
             steps: vec![],
@@ -452,8 +457,8 @@ impl<'a> PipelineContext<'a> {
 
 /// Continue the pipeline after artifact setup. Ensures best-effort report writing
 /// and subprocess teardown even on failure.
-fn run_test_with_artifacts(
-    ctx: &PipelineContext,
+async fn run_test_with_artifacts(
+    ctx: &PipelineContext<'_>,
     mut steps: Vec<bugatti::expand::ExpandedStep>,
 ) -> TestRunResult {
     // Phase 7: Initialize tracing
@@ -495,11 +500,13 @@ fn run_test_with_artifacts(
     if let Some(cp_name) = ctx.from_checkpoint {
         if ctx.effective.checkpoint.is_none() {
             let mut no_processes = vec![];
-            return ctx.fail_early(
-                EXIT_CONFIG_ERROR,
-                format!("--from-checkpoint \"{cp_name}\" requires a [checkpoint] section in bugatti.config.toml"),
-                &mut no_processes,
-            );
+            return ctx
+                .fail_early(
+                    EXIT_CONFIG_ERROR,
+                    format!("--from-checkpoint \"{cp_name}\" requires a [checkpoint] section in bugatti.config.toml"),
+                    &mut no_processes,
+                )
+                .await;
         }
         let cp_step_idx = steps
             .iter()
@@ -526,7 +533,9 @@ fn run_test_with_artifacts(
                         available.join(", ")
                     )
                 };
-                return ctx.fail_early(EXIT_CONFIG_ERROR, msg, &mut no_processes);
+                return ctx
+                    .fail_early(EXIT_CONFIG_ERROR, msg, &mut no_processes)
+                    .await;
             }
         }
     }
@@ -535,14 +544,16 @@ fn run_test_with_artifacts(
 
     // Phase 8: Run short-lived setup commands
     if let Err(e) =
-        command::run_short_lived_commands(ctx.effective, ctx.artifact_dir, ctx.skip_cmds)
+        command::run_short_lived_commands(ctx.effective, ctx.artifact_dir, ctx.skip_cmds).await
     {
         tracing::error!(error = %e, "short-lived command failed");
-        return ctx.fail_early(
-            EXIT_SETUP_ERROR,
-            format!("setup command failed: {e}"),
-            &mut no_processes,
-        );
+        return ctx
+            .fail_early(
+                EXIT_SETUP_ERROR,
+                format!("setup command failed: {e}"),
+                &mut no_processes,
+            )
+            .await;
     }
 
     // Phase 9: Spawn long-lived commands
@@ -551,15 +562,19 @@ fn run_test_with_artifacts(
         ctx.artifact_dir,
         ctx.skip_cmds,
         ctx.skip_readiness,
-    ) {
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "long-lived command failed");
-            return ctx.fail_early(
-                EXIT_PROVIDER_ERROR,
-                format!("long-lived command failed: {e}"),
-                &mut no_processes,
-            );
+            return ctx
+                .fail_early(
+                    EXIT_PROVIDER_ERROR,
+                    format!("long-lived command failed: {e}"),
+                    &mut no_processes,
+                )
+                .await;
         }
     };
 
@@ -569,35 +584,41 @@ fn run_test_with_artifacts(
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e, "provider initialization failed");
-                return ctx.fail_early(
-                    EXIT_PROVIDER_ERROR,
-                    provider_initialization_error_message(&e),
-                    &mut tracked_processes,
-                );
+                return ctx
+                    .fail_early(
+                        EXIT_PROVIDER_ERROR,
+                        provider_initialization_error_message(&e),
+                        &mut tracked_processes,
+                    )
+                    .await;
             }
         };
 
-    if let Err(e) = session.start() {
+    if let Err(e) = session.start().await {
         tracing::error!(error = %e, "provider start failed");
-        return ctx.fail_early(
-            EXIT_PROVIDER_ERROR,
-            format!("provider start failed: {e}"),
-            &mut tracked_processes,
-        );
+        return ctx
+            .fail_early(
+                EXIT_PROVIDER_ERROR,
+                format!("provider start failed: {e}"),
+                &mut tracked_processes,
+            )
+            .await;
     }
 
     // Phase 11: Check for unexpected exits before step execution
     if let Some((name, code)) = command::check_for_unexpected_exits(&mut tracked_processes) {
         tracing::error!(command = %name, exit_code = ?code, "long-lived process exited unexpectedly");
-        let _ = session.close();
+        let _ = session.close().await;
         let code_str = code
             .map(|c| c.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        return ctx.fail_early(
-            EXIT_PROVIDER_ERROR,
-            format!("long-lived process '{name}' exited unexpectedly (code: {code_str})"),
-            &mut tracked_processes,
-        );
+        return ctx
+            .fail_early(
+                EXIT_PROVIDER_ERROR,
+                format!("long-lived process '{name}' exited unexpectedly (code: {code_str})"),
+                &mut tracked_processes,
+            )
+            .await;
     }
 
     // Phase 12: Execute steps
@@ -624,26 +645,30 @@ fn run_test_with_artifacts(
         ctx.effective.checkpoint.as_ref(),
         ctx.project_root,
         &INTERRUPTED,
-    ) {
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(e) => {
             tracing::error!(error = %e, "step execution failed");
-            let _ = session.close();
-            return ctx.fail_early(
-                EXIT_STEP_ERROR,
-                format!("execution error: {e}"),
-                &mut tracked_processes,
-            );
+            let _ = session.close().await;
+            return ctx
+                .fail_early(
+                    EXIT_STEP_ERROR,
+                    format!("execution error: {e}"),
+                    &mut tracked_processes,
+                )
+                .await;
         }
     };
 
     // Phase 13: Close provider session
-    if let Err(e) = session.close() {
+    if let Err(e) = session.close().await {
         tracing::warn!(error = %e, "provider session close failed (non-fatal)");
     }
 
     // Phase 14: Teardown long-lived processes
-    let teardown_results = command::teardown_processes(&mut tracked_processes);
+    let teardown_results = command::teardown_processes(&mut tracked_processes).await;
     for td in &teardown_results {
         if !td.success {
             tracing::warn!(command = %td.name, message = %td.message, "teardown issue");
@@ -679,7 +704,7 @@ fn run_test_with_artifacts(
 
 /// Discover and run all root test files, printing an aggregate summary.
 /// Returns the aggregate exit code.
-fn run_discovery(
+async fn run_discovery(
     project_root: &Path,
     skip_cmds: &[String],
     skip_readiness: &[String],
@@ -746,7 +771,8 @@ fn run_discovery(
             from_checkpoint,
             verbose,
             explicit_config,
-        );
+        )
+        .await;
         results.push(result);
     }
 
@@ -773,7 +799,7 @@ fn run_discovery(
 
 /// Run a single discovered test file through the full pipeline.
 #[allow(clippy::too_many_arguments)]
-fn run_single_test(
+async fn run_single_test(
     test: &DiscoveredTest,
     project_root: &Path,
     skip_cmds: &[String],
@@ -796,7 +822,8 @@ fn run_single_test(
         from_checkpoint,
         verbose,
         explicit_config,
-    );
+    )
+    .await;
 
     if let Some(err) = &result.error {
         eprintln!("  ERROR: {err}");

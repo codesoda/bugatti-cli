@@ -319,14 +319,14 @@ pub fn build_bootstrap_content(
 /// Returns the run outcome with all step results.
 /// The provider session must already be initialized and started.
 #[allow(clippy::too_many_arguments)]
-pub fn execute_steps(
+pub async fn execute_steps(
     session: &mut dyn AgentSession,
     steps: &[ExpandedStep],
     run_id: &RunId,
     session_id: &SessionId,
     artifact_dir: &ArtifactDir,
     step_timeout: Option<Duration>,
-    bootstrap_config: Option<&BootstrapConfig>,
+    bootstrap_config: Option<&BootstrapConfig<'_>>,
     checkpoint_config: Option<&crate::config::CheckpointConfig>,
     project_root: &std::path::Path,
     interrupted: &AtomicBool,
@@ -367,10 +367,10 @@ pub fn execute_steps(
         };
 
         let bootstrap_start = Instant::now();
-        match session.send_bootstrap(bootstrap_msg) {
-            Ok(stream) => {
+        match session.send_bootstrap(bootstrap_msg).await {
+            Ok(mut stream) => {
                 let mut bootstrap_transcript = String::new();
-                for chunk in stream {
+                while let Some(chunk) = stream.next_chunk().await {
                     match chunk {
                         Ok(OutputChunk::Text(text)) => bootstrap_transcript.push_str(&text),
                         Ok(OutputChunk::Done) => break,
@@ -380,6 +380,7 @@ pub fn execute_steps(
                         }
                     }
                 }
+                drop(stream);
                 // Write bootstrap transcript
                 let bootstrap_path = artifact_dir.transcripts.join("bootstrap.txt");
                 if let Err(e) = std::fs::write(&bootstrap_path, &bootstrap_transcript) {
@@ -437,7 +438,9 @@ pub fn execute_steps(
                         cp_id,
                         project_root,
                         cp_config.timeout_secs,
-                    ) {
+                    )
+                    .await
+                    {
                         println!("FAIL ....... checkpoint restore: {e}");
                         return Err(ExecutorError::CheckpointFailed(format!(
                             "restore \"{cp_id}\" failed: {e}"
@@ -524,7 +527,7 @@ pub fn execute_steps(
             .map(Duration::from_secs)
             .unwrap_or(timeout);
 
-        let result = execute_single_step(session, message, &effective_timeout, interrupted);
+        let result = execute_single_step(session, message, &effective_timeout, interrupted).await;
 
         let duration = step_start.elapsed();
 
@@ -639,7 +642,9 @@ pub fn execute_steps(
                     cp_id,
                     project_root,
                     cp_config.timeout_secs,
-                ) {
+                )
+                .await
+                {
                     println!("FAIL ....... checkpoint save: {e}");
                     return Err(ExecutorError::CheckpointFailed(format!(
                         "save \"{cp_id}\" failed: {e}"
@@ -670,16 +675,27 @@ pub fn execute_steps(
             source_file: "teardown".to_string(),
             instruction: "All test steps are complete. Close any browsers, tools, or resources you opened during this session.".to_string(),
         };
-        match session.send_step(teardown_msg) {
-            Ok(stream) => {
+        match session.send_step(teardown_msg).await {
+            Ok(mut stream) => {
                 let teardown_start = Instant::now();
                 let teardown_timeout = Duration::from_secs(30);
                 let mut teardown_transcript = String::new();
-                for chunk in stream {
-                    if teardown_start.elapsed() > teardown_timeout {
-                        tracing::warn!("teardown timed out");
-                        break;
-                    }
+                loop {
+                    let remaining = match teardown_timeout.checked_sub(teardown_start.elapsed()) {
+                        Some(r) => r,
+                        None => {
+                            tracing::warn!("teardown timed out");
+                            break;
+                        }
+                    };
+                    let chunk = match tokio::time::timeout(remaining, stream.next_chunk()).await {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break,
+                        Err(_) => {
+                            tracing::warn!("teardown timed out");
+                            break;
+                        }
+                    };
                     match chunk {
                         Ok(OutputChunk::Text(text)) => teardown_transcript.push_str(&text),
                         Ok(OutputChunk::Done) => break,
@@ -689,6 +705,7 @@ pub fn execute_steps(
                         }
                     }
                 }
+                drop(stream);
                 if let Some(ref mut f) = full_transcript_file {
                     let _ = writeln!(f, "=== Teardown ===");
                     let _ = writeln!(f, "{}", teardown_transcript);
@@ -829,7 +846,11 @@ fn print_run_summary(
 ///
 /// Returns Ok((transcript, StepResult)) on successful completion,
 /// or Err((transcript, StepResult)) on failure.
-fn execute_single_step(
+///
+/// The timeout is enforced with `tokio::time::timeout` around each chunk read,
+/// so a provider that hangs mid-stream is detected as soon as the deadline passes
+/// (not only after the next chunk arrives).
+async fn execute_single_step(
     session: &mut dyn AgentSession,
     message: StepMessage,
     timeout: &Duration,
@@ -838,7 +859,7 @@ fn execute_single_step(
     let start = Instant::now();
     let mut transcript = String::new();
 
-    let stream = match session.send_step(message) {
+    let mut stream = match session.send_step(message).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "provider send_step failed");
@@ -846,24 +867,42 @@ fn execute_single_step(
         }
     };
 
-    for chunk_result in stream {
-        // Check timeout
-        if start.elapsed() > *timeout {
-            tracing::error!(
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "step timed out during streaming"
-            );
-            return Err((transcript, StepResult::Timeout));
-        }
+    loop {
+        // Check timeout and compute the remaining budget for the next chunk
+        let remaining = match timeout.checked_sub(start.elapsed()) {
+            Some(r) => r,
+            None => {
+                tracing::error!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "step timed out during streaming"
+                );
+                drop(stream);
+                return Err((transcript, StepResult::Timeout));
+            }
+        };
 
         // Check for Ctrl+C interruption
         if interrupted.load(Ordering::Relaxed) {
             tracing::warn!("step interrupted by Ctrl+C during streaming");
+            drop(stream);
             return Err((
                 transcript,
                 StepResult::ProviderFailed("interrupted by Ctrl+C".to_string()),
             ));
         }
+
+        let chunk_result = match tokio::time::timeout(remaining, stream.next_chunk()).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => {
+                tracing::error!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "step timed out waiting for provider output"
+                );
+                drop(stream);
+                return Err((transcript, StepResult::Timeout));
+            }
+        };
 
         match chunk_result {
             Ok(OutputChunk::Text(text)) => {
@@ -873,19 +912,12 @@ fn execute_single_step(
                 break;
             }
             Err(e) => {
+                drop(stream);
                 return Err((transcript, StepResult::ProviderFailed(e.to_string())));
             }
         }
     }
-
-    // Check timeout one more time after stream ends
-    if start.elapsed() > *timeout {
-        tracing::error!(
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "step timed out after streaming"
-        );
-        return Err((transcript, StepResult::Timeout));
-    }
+    drop(stream);
 
     // Parse result contract
     match parse_result_marker(&transcript) {
@@ -1002,6 +1034,7 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl AgentSession for MockSession {
         fn initialize(
             _config: &Config,
@@ -1014,33 +1047,33 @@ mod tests {
             Ok(Self::new(vec![]))
         }
 
-        fn start(&mut self) -> Result<(), ProviderError> {
+        async fn start(&mut self) -> Result<(), ProviderError> {
             Ok(())
         }
 
-        fn send_bootstrap(
+        async fn send_bootstrap(
             &mut self,
             _message: BootstrapMessage,
-        ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-        {
-            Ok(Box::new(std::iter::empty()))
+        ) -> Result<Box<dyn crate::provider::OutputStream + '_>, ProviderError> {
+            Ok(Box::new(crate::provider::VecOutputStream::empty()))
         }
 
-        fn send_step(
+        async fn send_step(
             &mut self,
             _message: StepMessage,
-        ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-        {
+        ) -> Result<Box<dyn crate::provider::OutputStream + '_>, ProviderError> {
             if self.call_count < self.responses.len() {
                 let idx = self.call_count;
                 self.call_count += 1;
-                Ok(Box::new(self.responses[idx].clone().into_iter()))
+                Ok(Box::new(crate::provider::VecOutputStream::new(
+                    self.responses[idx].clone(),
+                )))
             } else {
                 Err(ProviderError::SendFailed("no more responses".to_string()))
             }
         }
 
-        fn close(&mut self) -> Result<(), ProviderError> {
+        async fn close(&mut self) -> Result<(), ProviderError> {
             Ok(())
         }
     }
@@ -1087,8 +1120,8 @@ mod tests {
         (tmp, dir)
     }
 
-    #[test]
-    fn execute_steps_all_ok() {
+    #[tokio::test]
+    async fn execute_steps_all_ok() {
         let steps = test_steps();
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1120,6 +1153,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(outcome.all_passed);
@@ -1134,8 +1168,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn execute_steps_stops_on_error() {
+    #[tokio::test]
+    async fn execute_steps_stops_on_error() {
         let steps = test_steps();
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1166,6 +1200,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(!outcome.all_passed);
@@ -1176,8 +1211,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn execute_steps_warn_continues() {
+    #[tokio::test]
+    async fn execute_steps_warn_continues() {
         let steps = test_steps();
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1205,6 +1240,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(outcome.all_passed);
@@ -1215,8 +1251,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn execute_steps_missing_result_marker() {
+    #[tokio::test]
+    async fn execute_steps_missing_result_marker() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1240,6 +1276,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(!outcome.all_passed);
@@ -1249,8 +1286,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn execute_steps_provider_send_failure() {
+    #[tokio::test]
+    async fn execute_steps_provider_send_failure() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1270,6 +1307,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(!outcome.all_passed);
@@ -1279,8 +1317,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn execute_steps_provider_stream_error() {
+    #[tokio::test]
+    async fn execute_steps_provider_stream_error() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1302,6 +1340,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(!outcome.all_passed);
@@ -1313,8 +1352,8 @@ mod tests {
         assert!(outcome.steps[0].transcript.contains("partial output"));
     }
 
-    #[test]
-    fn execute_steps_writes_transcript_artifacts() {
+    #[tokio::test]
+    async fn execute_steps_writes_transcript_artifacts() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1336,6 +1375,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         // Per-step transcript
@@ -1350,8 +1390,8 @@ mod tests {
         assert!(full_transcript.is_file());
     }
 
-    #[test]
-    fn execute_steps_full_transcript_written_incrementally() {
+    #[tokio::test]
+    async fn execute_steps_full_transcript_written_incrementally() {
         let steps = test_steps();
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1383,6 +1423,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(outcome.artifact_errors.is_empty());
@@ -1397,8 +1438,8 @@ mod tests {
         assert!(contents.contains("Second step output."));
     }
 
-    #[test]
-    fn execute_steps_full_transcript_captures_partial_on_failure() {
+    #[tokio::test]
+    async fn execute_steps_full_transcript_captures_partial_on_failure() {
         let steps = test_steps();
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1429,6 +1470,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         // Full transcript should contain the first (failed) step but not the second
@@ -1440,8 +1482,8 @@ mod tests {
         assert!(outcome.artifact_errors.is_empty());
     }
 
-    #[test]
-    fn execute_steps_records_duration() {
+    #[tokio::test]
+    async fn execute_steps_records_duration() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1463,6 +1505,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         // Duration should be very small but non-zero
@@ -1480,8 +1523,8 @@ mod tests {
         assert!(!StepResult::ProviderFailed("x".to_string()).is_pass());
     }
 
-    #[test]
-    fn execute_steps_multiple_text_chunks_concatenated() {
+    #[tokio::test]
+    async fn execute_steps_multiple_text_chunks_concatenated() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1505,6 +1548,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(outcome.all_passed);
@@ -1563,8 +1607,8 @@ mod tests {
 
     // --- BUGATTI_LOG in execution tests ---
 
-    #[test]
-    fn execute_steps_captures_log_events() {
+    #[tokio::test]
+    async fn execute_steps_captures_log_events() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1588,6 +1632,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(outcome.all_passed);
@@ -1598,8 +1643,8 @@ mod tests {
         assert_eq!(outcome.steps[0].log_events[1].message, "Schema validated");
     }
 
-    #[test]
-    fn execute_steps_no_log_events() {
+    #[tokio::test]
+    async fn execute_steps_no_log_events() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1621,6 +1666,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(outcome.steps[0].log_events.is_empty());
@@ -1629,8 +1675,8 @@ mod tests {
         assert!(!log_events_path.exists());
     }
 
-    #[test]
-    fn execute_steps_writes_log_events_file() {
+    #[tokio::test]
+    async fn execute_steps_writes_log_events_file() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1654,6 +1700,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         // Log events file should exist and be separate from transcript
@@ -1670,8 +1717,8 @@ mod tests {
 
     // --- Evidence ref tests ---
 
-    #[test]
-    fn execute_steps_evidence_refs_for_error() {
+    #[tokio::test]
+    async fn execute_steps_evidence_refs_for_error() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1695,6 +1742,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert_eq!(outcome.steps[0].evidence_refs.len(), 1);
@@ -1705,8 +1753,8 @@ mod tests {
         assert!(outcome.steps[0].evidence_refs[0].collection_error.is_none());
     }
 
-    #[test]
-    fn execute_steps_evidence_refs_for_warn() {
+    #[tokio::test]
+    async fn execute_steps_evidence_refs_for_warn() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1728,13 +1776,14 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert_eq!(outcome.steps[0].evidence_refs.len(), 1);
     }
 
-    #[test]
-    fn execute_steps_evidence_refs_empty_for_ok() {
+    #[tokio::test]
+    async fn execute_steps_evidence_refs_empty_for_ok() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1756,6 +1805,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(outcome.steps[0].evidence_refs.is_empty());
@@ -1875,8 +1925,8 @@ mod tests {
         assert!(!content.contains("Base URL"));
     }
 
-    #[test]
-    fn execute_steps_with_bootstrap_writes_transcript() {
+    #[tokio::test]
+    async fn execute_steps_with_bootstrap_writes_transcript() {
         let steps = vec![test_steps().remove(0)];
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1906,6 +1956,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         // Bootstrap transcript file should exist
@@ -1920,8 +1971,8 @@ mod tests {
 
     // --- Interrupt tests ---
 
-    #[test]
-    fn execute_steps_interrupted_between_steps() {
+    #[tokio::test]
+    async fn execute_steps_interrupted_between_steps() {
         let steps = test_steps(); // 2 steps
         let (run_id, session_id) = test_run_ids();
         let (_tmp, artifact_dir) = test_artifact_dir();
@@ -1956,6 +2007,7 @@ mod tests {
             std::path::Path::new("."),
             &flag,
         )
+        .await
         .unwrap();
 
         // No steps should have executed
@@ -1966,8 +2018,8 @@ mod tests {
 
     // --- Setup step tests ---
 
-    #[test]
-    fn setup_step_tolerates_missing_result_marker() {
+    #[tokio::test]
+    async fn setup_step_tolerates_missing_result_marker() {
         let steps = vec![ExpandedStep {
             step_id: 0,
             instruction: "Start the browser in headed mode".to_string(),
@@ -2002,6 +2054,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(outcome.all_passed);
@@ -2013,8 +2066,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn setup_step_bypasses_skip() {
+    #[tokio::test]
+    async fn setup_step_bypasses_skip() {
         let steps = vec![
             ExpandedStep {
                 step_id: 0,
@@ -2077,6 +2130,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(outcome.all_passed);
@@ -2099,8 +2153,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn setup_step_not_counted_in_all_passed() {
+    #[tokio::test]
+    async fn setup_step_not_counted_in_all_passed() {
         // A setup step + a failing test step: all_passed should be false
         // because the test step failed, not because of the setup step.
         let steps = vec![
@@ -2155,6 +2209,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         assert!(!outcome.all_passed);
@@ -2170,8 +2225,8 @@ mod tests {
         assert!(outcome.steps[1].result.is_failure());
     }
 
-    #[test]
-    fn setup_step_failure_aborts_run() {
+    #[tokio::test]
+    async fn setup_step_failure_aborts_run() {
         let steps = vec![
             ExpandedStep {
                 step_id: 0,
@@ -2222,6 +2277,7 @@ mod tests {
             std::path::Path::new("."),
             &AtomicBool::new(false),
         )
+        .await
         .unwrap();
 
         // Only the setup step executed, and it failed

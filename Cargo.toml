@@ -5,6 +5,7 @@ edition = "2021"
 description = "A CLI for plain-English, agent-assisted local application verification using *.test.toml files"
 
 [dependencies]
+async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
@@ -18,7 +19,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "fmt"] }
 uuid = { version = "1", features = ["v4"] }
 which = "7"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "fs"] }
 semver = "1"
 sha2 = "0.10"
 flate2 = "1"

@@ -1,11 +1,14 @@
 use crate::config::Config;
 use crate::provider::{
-    format_step_message, AgentSession, BootstrapMessage, OutputChunk, ProviderError, StepMessage,
+    format_step_message, AgentSession, BootstrapMessage, OutputChunk, OutputStream, ProviderError,
+    StepMessage,
 };
+use async_trait::async_trait;
 use serde::Deserialize;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdout, Command};
 
 /// OpenAI Codex CLI provider adapter.
 ///
@@ -45,15 +48,15 @@ impl CodexAdapter {
         path
     }
 
-    fn spawn_turn(
+    async fn spawn_turn(
         &mut self,
         prompt: &str,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
         let output_path = self.next_output_path();
         let requires_thread_id = self.thread_id.is_none();
 
         let mut cmd = Command::new(&self.binary_path);
+        cmd.kill_on_drop(true);
         cmd.arg("exec");
         if let Some(thread_id) = self.thread_id.as_deref() {
             cmd.arg("resume").arg(thread_id);
@@ -76,12 +79,13 @@ impl CodexAdapter {
 
         if self.verbose {
             let args: Vec<_> = cmd
+                .as_std()
                 .get_args()
                 .map(|arg| arg.to_string_lossy().to_string())
                 .collect();
             eprintln!(
                 "\x1b[38;5;243m[verbose]\x1b[0m \x1b[38;5;243mlaunch:\x1b[0m \x1b[38;5;152m{} {}\x1b[0m",
-                cmd.get_program().to_string_lossy(),
+                cmd.as_std().get_program().to_string_lossy(),
                 args.join(" ")
             );
         }
@@ -96,9 +100,11 @@ impl CodexAdapter {
             .ok_or_else(|| ProviderError::StartFailed("failed to capture stdin".to_string()))?;
         stdin
             .write_all(prompt.as_bytes())
+            .await
             .map_err(|e| ProviderError::SendFailed(format!("failed to write to stdin: {e}")))?;
         stdin
             .flush()
+            .await
             .map_err(|e| ProviderError::SendFailed(format!("failed to flush stdin: {e}")))?;
         drop(stdin);
 
@@ -107,7 +113,7 @@ impl CodexAdapter {
             .take()
             .ok_or_else(|| ProviderError::StartFailed("failed to capture stdout".to_string()))?;
 
-        Ok(Box::new(CodexTurnIterator {
+        Ok(Box::new(CodexTurnStream {
             child,
             reader: BufReader::new(stdout),
             output_path,
@@ -121,6 +127,7 @@ impl CodexAdapter {
     }
 }
 
+#[async_trait]
 impl AgentSession for CodexAdapter {
     fn initialize(
         config: &Config,
@@ -141,32 +148,30 @@ impl AgentSession for CodexAdapter {
         })
     }
 
-    fn start(&mut self) -> Result<(), ProviderError> {
+    async fn start(&mut self) -> Result<(), ProviderError> {
         Ok(())
     }
 
-    fn send_bootstrap(
+    async fn send_bootstrap(
         &mut self,
         message: BootstrapMessage,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
-        self.spawn_turn(&message.content)
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
+        self.spawn_turn(&message.content).await
     }
 
-    fn send_step(
+    async fn send_step(
         &mut self,
         message: StepMessage,
-    ) -> Result<Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>, ProviderError>
-    {
-        self.spawn_turn(&format_step_message(&message))
+    ) -> Result<Box<dyn OutputStream + '_>, ProviderError> {
+        self.spawn_turn(&format_step_message(&message)).await
     }
 
-    fn close(&mut self) -> Result<(), ProviderError> {
+    async fn close(&mut self) -> Result<(), ProviderError> {
         Ok(())
     }
 }
 
-struct CodexTurnIterator<'a> {
+struct CodexTurnStream<'a> {
     child: Child,
     reader: BufReader<ChildStdout>,
     output_path: PathBuf,
@@ -178,10 +183,9 @@ struct CodexTurnIterator<'a> {
     requires_thread_id: bool,
 }
 
-impl<'a> Iterator for CodexTurnIterator<'a> {
-    type Item = Result<OutputChunk, ProviderError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+#[async_trait]
+impl<'a> OutputStream for CodexTurnStream<'a> {
+    async fn next_chunk(&mut self) -> Option<Result<OutputChunk, ProviderError>> {
         if let Some(output) = self.pending_output.take() {
             self.pending_done = true;
             return Some(Ok(OutputChunk::Text(output)));
@@ -199,9 +203,9 @@ impl<'a> Iterator for CodexTurnIterator<'a> {
 
         loop {
             let mut line = String::new();
-            match self.reader.read_line(&mut line) {
+            match self.reader.read_line(&mut line).await {
                 Ok(0) => {
-                    let status = match self.child.wait() {
+                    let status = match self.child.wait().await {
                         Ok(status) => status,
                         Err(e) => {
                             self.complete = true;
@@ -226,7 +230,7 @@ impl<'a> Iterator for CodexTurnIterator<'a> {
                         return Some(Err(ProviderError::StreamError(message)));
                     }
 
-                    let output = match std::fs::read_to_string(&self.output_path) {
+                    let output = match tokio::fs::read_to_string(&self.output_path).await {
                         Ok(contents) => contents,
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
                         Err(e) => {
@@ -243,8 +247,8 @@ impl<'a> Iterator for CodexTurnIterator<'a> {
                         return Some(Ok(OutputChunk::Done));
                     }
 
-                    self.pending_output = Some(output);
-                    return self.next();
+                    self.pending_done = true;
+                    return Some(Ok(OutputChunk::Text(output)));
                 }
                 Ok(_) => {
                     let trimmed = line.trim();
@@ -368,11 +372,11 @@ exit 1
         script_path
     }
 
-    fn collect_output(
-        stream: Box<dyn Iterator<Item = Result<OutputChunk, ProviderError>> + '_>,
+    async fn collect_output(
+        mut stream: Box<dyn OutputStream + '_>,
     ) -> Result<String, ProviderError> {
         let mut output = String::new();
-        for item in stream {
+        while let Some(item) = stream.next_chunk().await {
             match item? {
                 OutputChunk::Text(text) => output.push_str(&text),
                 OutputChunk::Done => break,
@@ -381,8 +385,8 @@ exit 1
         Ok(output)
     }
 
-    #[test]
-    fn send_bootstrap_starts_new_codex_thread() {
+    #[tokio::test]
+    async fn send_bootstrap_starts_new_codex_thread() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
@@ -403,16 +407,18 @@ exit 1
                     session_id: SessionId("sess-123".to_string()),
                     content: "Bootstrap prompt".to_string(),
                 })
+                .await
                 .unwrap(),
         )
+        .await
         .unwrap();
 
         assert_eq!(adapter.thread_id.as_deref(), Some("thread-123"));
         assert_eq!(output, "Bootstrap acknowledged.\n");
     }
 
-    #[test]
-    fn send_step_resumes_existing_codex_thread() {
+    #[tokio::test]
+    async fn send_step_resumes_existing_codex_thread() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
@@ -436,8 +442,10 @@ exit 1
                     source_file: "tests/flow.test.toml".to_string(),
                     instruction: "Verify the login form works".to_string(),
                 })
+                .await
                 .unwrap(),
         )
+        .await
         .unwrap();
 
         assert_eq!(output, "RESULT OK\n");
