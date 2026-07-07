@@ -177,7 +177,7 @@ async fn main() {
             config_path,
         } => {
             let project_root = std::env::current_dir().unwrap_or_else(|e| {
-                eprintln!("ERROR: failed to determine current directory: {e}");
+                tracing::error!(error = %e, "failed to determine current directory");
                 std::process::exit(EXIT_CONFIG_ERROR);
             });
 
@@ -727,14 +727,14 @@ async fn run_discovery(
     let discovery = match discover_root_tests(project_root) {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("ERROR: {e}");
+            tracing::error!(error = %e, "discover root tests failed");
             return EXIT_CONFIG_ERROR;
         }
     };
 
     // Report per-file parse errors before starting any runs
     for err in &discovery.errors {
-        eprintln!("PARSE ERROR: {err}");
+        tracing::error!(error = %err, "parse error");
     }
 
     if discovery.tests.is_empty() {
@@ -835,7 +835,7 @@ async fn run_single_test(
     .await;
 
     if let Some(err) = &result.error {
-        eprintln!("  ERROR: {err}");
+        tracing::error!(error = %err, "test failed before execution");
     }
     println!();
 
