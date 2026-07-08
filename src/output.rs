@@ -70,6 +70,22 @@ pub fn stderr_colors() -> &'static Colors {
     STDERR_COLORS.get_or_init(|| build_colors(detect_color_enabled(Stream::Stderr)))
 }
 
+/// Format the "[verbose] launch: <program> <args>" line.
+pub fn format_verbose_launch(c: &Colors, program: &str, args: &str) -> String {
+    format!(
+        "{}[verbose]{} {}launch:{} {}{} {}{}",
+        c.dim, c.reset, c.dim, c.reset, c.cmd, program, args, c.reset
+    )
+}
+
+/// Format the "[verbose] tool: <name> <preview>" line.
+pub fn format_verbose_tool(c: &Colors, name: &str, preview: &str) -> String {
+    format!(
+        "{}[verbose]{} {}tool:{} {}{}{} {}{}{}",
+        c.dim, c.reset, c.dim, c.reset, c.tool, name, c.reset, c.light, preview, c.reset
+    )
+}
+
 /// Returns whether ANSI color output should be enabled.
 ///
 /// Color is disabled when:
@@ -104,7 +120,47 @@ pub fn ansi_stderr(code: &'static str) -> &'static str {
 
 pub mod prelude {
     pub use super::{
-        ansi, ansi_stderr, color_enabled, color_enabled_stderr, colors, stderr_colors,
-        stdout_colors, Colors, Stream,
+        ansi, ansi_stderr, color_enabled, color_enabled_stderr, colors, format_verbose_launch,
+        format_verbose_tool, stderr_colors, stdout_colors, Colors, Stream,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbose_launch_line_includes_ansi_when_enabled() {
+        let c = build_colors(true);
+        let line = format_verbose_launch(&c, "codex", "exec --json");
+        assert!(line.contains("\x1b[38;5;243m"));
+        assert!(line.contains("\x1b[38;5;152mcodex exec --json"));
+        assert!(line.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn verbose_launch_line_plain_when_disabled() {
+        let c = build_colors(false);
+        assert_eq!(
+            format_verbose_launch(&c, "pi", "--print"),
+            "[verbose] launch: pi --print"
+        );
+    }
+
+    #[test]
+    fn verbose_tool_line_includes_palette_when_enabled() {
+        let c = build_colors(true);
+        let line = format_verbose_tool(&c, "bash", "$ ls");
+        assert!(line.contains("\x1b[38;5;111mbash"));
+        assert!(line.contains("\x1b[38;5;250m$ ls"));
+    }
+
+    #[test]
+    fn verbose_tool_line_plain_when_disabled() {
+        let c = build_colors(false);
+        assert_eq!(
+            format_verbose_tool(&c, "bash", "$ ls"),
+            "[verbose] tool: bash $ ls"
+        );
+    }
 }

@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::output;
 use crate::provider::{
     format_step_message, AgentSession, BootstrapMessage, OutputChunk, OutputStream, ProviderError,
     StepMessage,
@@ -78,15 +79,19 @@ impl CodexAdapter {
             .stderr(Stdio::null());
 
         if self.verbose {
+            let c = output::stderr_colors();
             let args: Vec<_> = cmd
                 .as_std()
                 .get_args()
                 .map(|arg| arg.to_string_lossy().to_string())
                 .collect();
             eprintln!(
-                "\x1b[38;5;243m[verbose]\x1b[0m \x1b[38;5;243mlaunch:\x1b[0m \x1b[38;5;152m{} {}\x1b[0m",
-                cmd.as_std().get_program().to_string_lossy(),
-                args.join(" ")
+                "{}",
+                output::format_verbose_launch(
+                    c,
+                    &cmd.as_std().get_program().to_string_lossy(),
+                    &args.join(" "),
+                )
             );
         }
 
