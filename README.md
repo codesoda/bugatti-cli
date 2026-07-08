@@ -143,6 +143,25 @@ readiness_timeout_secs = 120
 | `readiness_urls` | `[]` | Multiple URLs to poll (all must respond) |
 | `readiness_timeout_secs` | `30` | How long to wait for readiness before failing |
 
+### Layered Configuration
+
+Configuration is assembled from up to three layers, in ascending precedence:
+
+1. **Global config** — `~/.bugatti/config.toml` (override the directory with `BUGATTI_CONFIG_HOME`). Optional; useful for machine-wide defaults such as `agent_args`.
+2. **Project config** — `bugatti.config.toml` in the project root, or the file passed via `--config <path>`.
+3. **Environment overrides** — `BUGATTI_*` variables (see below).
+
+Higher layers win per field: any field the project config explicitly sets (even to a default value, e.g. `name = "claude-code"` or `agent_args = []`) overrides the global layer. `[commands.*]` tables merge by name, with project definitions replacing same-named global ones. A missing global config is fine; a malformed one is a hard error.
+
+#### Environment Overrides
+
+| Variable | Overrides | Notes |
+|----------|-----------|-------|
+| `BUGATTI_PROVIDER` | `provider.name` | Empty value is treated as unset |
+| `BUGATTI_BASE_URL` | `provider.base_url` | Empty value is treated as unset |
+| `BUGATTI_STEP_TIMEOUT` | `provider.step_timeout_secs` | Must be a positive integer (seconds) |
+| `BUGATTI_CONFIG_HOME` | Global config directory | Defaults to `~/.bugatti` |
+
 ### CLI Flags
 
 | Flag | Description |
@@ -281,6 +300,18 @@ name = "Custom provider test"
 extra_system_prompt = "Be concise"
 step_timeout_secs = 600
 base_url = "http://localhost:5000"
+```
+
+Tests can also override configured commands by name. Only the fields you set are replaced (`kind` cannot be changed); overrides for command names that don't exist in the config are ignored with a warning:
+
+```toml
+name = "Test against staging DB"
+
+[overrides.commands.migrate]
+cmd = "npm run db:migrate -- --env staging"
+
+[overrides.commands.server]
+readiness_timeout_secs = 120
 ```
 
 ### Skipping Steps
