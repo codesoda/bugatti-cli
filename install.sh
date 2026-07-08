@@ -22,7 +22,6 @@ set -eu
 
 REPO_OWNER="${BUGATTI_REPO_OWNER:-codesoda}"
 REPO_NAME="${BUGATTI_REPO_NAME:-bugatti-cli}"
-REPO_REF="${BUGATTI_REPO_REF:-main}"
 
 # --- Color support ---
 
@@ -107,12 +106,16 @@ USAGE
 # --- Argument parsing ---
 
 SKIP_SYMLINK=0
+PRINT_TARGET=0
 
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --skip-symlink)
                 SKIP_SYMLINK=1
+                ;;
+            --print-target)
+                PRINT_TARGET=1
                 ;;
             --help|-h)
                 usage
@@ -150,13 +153,23 @@ detect_target() {
     arch="$(uname -m)"
 
     case "$os" in
-        Darwin) ;;
-        *) die "Pre-built binaries are only available for macOS (got $os). Build from a clone instead." ;;
-    esac
-
-    case "$arch" in
-        arm64|aarch64) echo "aarch64-apple-darwin" ;;
-        *) die "Pre-built binaries are only available for arm64 (got $arch). Build from a clone instead." ;;
+        Darwin)
+            case "$arch" in
+                arm64|aarch64) echo "aarch64-apple-darwin" ;;
+                x86_64) echo "x86_64-apple-darwin" ;;
+                *) die "Unsupported macOS architecture: $arch. Build from a clone instead." ;;
+            esac
+            ;;
+        Linux)
+            case "$arch" in
+                x86_64|amd64) echo "x86_64-unknown-linux-gnu" ;;
+                arm64|aarch64) echo "aarch64-unknown-linux-gnu" ;;
+                *) die "Unsupported Linux architecture: $arch. Build from a clone instead." ;;
+            esac
+            ;;
+        *)
+            die "Unsupported OS: $os. Pre-built binaries are available for macOS and Linux; build from a clone instead."
+            ;;
     esac
 }
 
@@ -321,6 +334,11 @@ print_summary() {
 
 main() {
     parse_args "$@"
+
+    if [ "$PRINT_TARGET" = 1 ]; then
+        detect_target
+        exit 0
+    fi
 
     printf '\n%b%bBugatti Installer%b\n' "$C_BOLD" "$C_HEADER" "$C_RESET"
     dim "━━━━━━━━━━━━━━━━━"

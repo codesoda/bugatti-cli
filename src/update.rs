@@ -814,6 +814,32 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(
+        all(
+            target_os = "macos",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        )
+    ))]
+    fn build_target_is_known_release_target() {
+        let known = [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+        ];
+        assert!(
+            known.contains(&build_target()),
+            "TARGET '{}' is not in the release matrix — update release.yml",
+            build_target()
+        );
+    }
+
+    #[test]
     fn build_release_metadata_constructs_urls() {
         let meta = build_release_metadata("v0.3.1", "https://github.com/codesoda/bugatti-cli");
         assert_eq!(meta.tag, "v0.3.1");
