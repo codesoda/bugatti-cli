@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 
 /// Claude Code CLI provider adapter.
@@ -338,15 +338,18 @@ impl AgentSession for ClaudeCodeAdapter {
 /// Reads JSONL from stdout, parsing each line into `OutputChunk` values.
 /// Yields `OutputChunk::Done` when a `result` event is received (turn complete).
 /// The process stays alive for the next message.
-struct StreamTurnStream<'a> {
-    reader: &'a mut BufReader<tokio::process::ChildStdout>,
+struct StreamTurnStream<'a, R> {
+    reader: &'a mut R,
     done: bool,
     verbose: bool,
     colors: Option<&'static output::Colors>,
 }
 
 #[async_trait]
-impl<'a> OutputStream for StreamTurnStream<'a> {
+impl<'a, R> OutputStream for StreamTurnStream<'a, R>
+where
+    R: AsyncBufRead + Unpin + Send,
+{
     async fn next_chunk(&mut self) -> Option<Result<OutputChunk, ProviderError>> {
         if self.done {
             return None;
@@ -531,6 +534,30 @@ mod tests {
     use super::*;
     use crate::config::{Config, ProviderConfig};
     use indexmap::IndexMap;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    struct FailingReader;
+
+    impl AsyncRead for FailingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+        }
+    }
+
+    impl AsyncBufRead for FailingReader {
+        fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+            Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+        }
+
+        fn consume(self: Pin<&mut Self>, _amt: usize) {}
+    }
 
     fn test_config() -> Config {
         Config {
@@ -663,6 +690,46 @@ mod tests {
 
         assert_eq!(collected, vec!["Hello"]);
         let _ = child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn stream_turn_stream_eof_reports_session_crashed_then_done() {
+        let mut reader = BufReader::new(std::io::Cursor::new(Vec::<u8>::new()));
+        let mut stream = StreamTurnStream {
+            reader: &mut reader,
+            done: false,
+            verbose: false,
+            colors: None,
+        };
+
+        match stream.next_chunk().await {
+            Some(Err(ProviderError::SessionCrashed(msg))) => {
+                assert!(msg.contains("claude process exited unexpectedly"));
+            }
+            other => panic!("expected SessionCrashed on EOF, got: {other:?}"),
+        }
+        assert!(stream.next_chunk().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_turn_stream_broken_pipe_reports_stream_error_then_done() {
+        let mut reader = FailingReader;
+        let mut stream = StreamTurnStream {
+            reader: &mut reader,
+            done: false,
+            verbose: false,
+            colors: None,
+        };
+
+        match stream.next_chunk().await {
+            Some(Err(ProviderError::StreamError(msg))) => {
+                // Assert on our own message prefix only; the io::Error Display
+                // text for BrokenPipe is platform-dependent.
+                assert!(msg.contains("failed to read from claude CLI stdout"));
+            }
+            other => panic!("expected StreamError on broken pipe, got: {other:?}"),
+        }
+        assert!(stream.next_chunk().await.is_none());
     }
 
     #[tokio::test]
