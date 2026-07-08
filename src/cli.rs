@@ -45,7 +45,8 @@ pub enum Commands {
 
     /// Scaffold bugatti.config.toml and an example test file
     Init {
-        /// Accept all defaults without prompting
+        /// Accept defaults (init is currently non-interactive; reserved for
+        /// future prompts)
         #[arg(long, short)]
         yes: bool,
     },

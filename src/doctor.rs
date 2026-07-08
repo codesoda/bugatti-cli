@@ -69,6 +69,10 @@ pub async fn run_doctor(dir: &Path) -> i32 {
     print_check(&commands_check);
     checks.push(commands_check);
 
+    let readiness_check = check_readiness_urls(&config);
+    print_check(&readiness_check);
+    checks.push(readiness_check);
+
     for check in check_test_files(dir) {
         print_check(&check);
         checks.push(check);
@@ -108,10 +112,9 @@ fn print_check(result: &CheckResult) {
 
 fn check_version_target() -> CheckResult {
     CheckResult::ok(format!(
-        "bugatti v{} ({}/{})",
+        "bugatti v{} ({})",
         update::current_version(),
-        std::env::consts::ARCH,
-        std::env::consts::OS
+        env!("TARGET")
     ))
 }
 
@@ -182,13 +185,14 @@ async fn check_provider_binary(config: &Config) -> CheckResult {
 }
 
 async fn binary_version(binary: &str) -> Option<String> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(2),
-        Command::new(binary).arg("--version").output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let mut command = Command::new(binary);
+    // kill_on_drop: if the probe hangs past the timeout, dropping the future
+    // must not leak a running child process.
+    command.arg("--version").kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(2), command.output())
+        .await
+        .ok()?
+        .ok()?;
 
     if !output.status.success() {
         return None;
@@ -208,7 +212,14 @@ async fn binary_version(binary: &str) -> Option<String> {
 }
 
 pub fn command_binary_token(cmd: &str) -> Option<&str> {
-    cmd.split_whitespace().next()
+    let token = cmd.split_whitespace().next()?;
+    // Commands run via `sh -c`, so a first token that is an env assignment or
+    // contains shell syntax is not a binary name; checking it on PATH would
+    // produce a spurious warning.
+    if token.contains('=') || token.contains(|c| "$&|;<>(){}".contains(c)) {
+        return None;
+    }
+    Some(token)
 }
 
 fn check_commands(config: &Config) -> CheckResult {
@@ -218,8 +229,13 @@ fn check_commands(config: &Config) -> CheckResult {
 
     let mut missing = Vec::new();
     for (name, def) in &config.commands {
-        let Some(token) = command_binary_token(&def.cmd) else {
+        if def.cmd.trim().is_empty() {
             missing.push(format!("{name}: empty command"));
+            continue;
+        }
+        let Some(token) = command_binary_token(&def.cmd) else {
+            // First token isn't a plain binary name (env assignment / shell
+            // syntax); skip the PATH heuristic rather than report noise.
             continue;
         };
         if which::which(token).is_err() {
@@ -229,7 +245,7 @@ fn check_commands(config: &Config) -> CheckResult {
 
     if missing.is_empty() {
         CheckResult::ok(format!(
-            "{} commands configured, all found on PATH",
+            "{} commands configured, first tokens resolved on PATH (commands run via `sh -c`)",
             config.commands.len()
         ))
     } else {
@@ -238,6 +254,37 @@ fn check_commands(config: &Config) -> CheckResult {
             missing.len(),
             missing.join("; ")
         ))
+    }
+}
+
+/// Validate readiness URLs configured for long-lived commands.
+///
+/// A malformed URL always fails at runtime, so an invalid entry is a failing
+/// check rather than a warning.
+fn check_readiness_urls(config: &Config) -> CheckResult {
+    let mut total = 0usize;
+    let mut invalid = Vec::new();
+
+    for (name, def) in &config.commands {
+        for url in def.effective_readiness_urls() {
+            total += 1;
+            match reqwest::Url::parse(url) {
+                Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
+                Ok(parsed) => invalid.push(format!(
+                    "{name}: `{url}` has unsupported scheme `{}` (expected http/https)",
+                    parsed.scheme()
+                )),
+                Err(e) => invalid.push(format!("{name}: `{url}` is not a valid URL ({e})")),
+            }
+        }
+    }
+
+    if total == 0 {
+        CheckResult::ok("0 readiness URLs configured")
+    } else if invalid.is_empty() {
+        CheckResult::ok(format!("{total} readiness URL(s) valid"))
+    } else {
+        CheckResult::fail(format!("invalid readiness URL(s): {}", invalid.join("; ")))
     }
 }
 
@@ -347,6 +394,61 @@ mod tests {
         assert_eq!(command_binary_token("npm run dev"), Some("npm"));
         assert_eq!(command_binary_token("  cargo run"), Some("cargo"));
         assert_eq!(command_binary_token(""), None);
+    }
+
+    #[test]
+    fn command_token_skips_env_assignments_and_shell_syntax() {
+        assert_eq!(command_binary_token("FOO=1 npm start"), None);
+        assert_eq!(command_binary_token("(cd app && npm dev)"), None);
+        assert_eq!(command_binary_token("$BIN run"), None);
+    }
+
+    fn command_with_readiness(urls: &[&str]) -> Config {
+        let mut commands = IndexMap::new();
+        commands.insert(
+            "server".to_string(),
+            CommandDef {
+                kind: CommandKind::LongLived,
+                cmd: "npm start".to_string(),
+                readiness_url: None,
+                readiness_urls: urls.iter().map(|u| u.to_string()).collect(),
+                readiness_timeout_secs: None,
+            },
+        );
+        Config {
+            provider: ProviderConfig::default(),
+            commands,
+            checkpoint: None,
+        }
+    }
+
+    #[test]
+    fn valid_readiness_urls_pass() {
+        let config = command_with_readiness(&["http://localhost:3000/health"]);
+        let check = check_readiness_urls(&config);
+        assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn malformed_readiness_url_is_a_failing_check() {
+        // Missing scheme: parses relative-ly or errors, either way must fail.
+        let config = command_with_readiness(&["localhost:3000/health"]);
+        let check = check_readiness_urls(&config);
+        assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn non_http_readiness_scheme_is_a_failing_check() {
+        let config = command_with_readiness(&["ftp://localhost:21"]);
+        let check = check_readiness_urls(&config);
+        assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn no_readiness_urls_is_ok() {
+        let config = command_with_readiness(&[]);
+        let check = check_readiness_urls(&config);
+        assert_eq!(check.status, CheckStatus::Ok);
     }
 
     #[test]
