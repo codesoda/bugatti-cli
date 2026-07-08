@@ -344,6 +344,44 @@ async fn execute_steps_provider_stream_error() {
 }
 
 #[tokio::test]
+async fn execute_steps_provider_stream_io_error() {
+    let steps = vec![test_steps().remove(0)];
+    let run_case = RunCase::new();
+    let artifact_dir = &run_case.artifact_dir;
+
+    let mut session = MockSession::new(vec![vec![
+        Ok(OutputChunk::Text(
+            "partial output before pipe failure".to_string(),
+        )),
+        Err(ProviderError::StreamError("broken pipe".to_string())),
+    ]]);
+
+    let outcome = execute_steps(
+        &mut session,
+        &steps,
+        &run_case.run_id,
+        &run_case.session_id,
+        artifact_dir,
+        None,
+        None,
+        None,
+        std::path::Path::new("."),
+        &AtomicBool::new(false),
+    )
+    .await
+    .unwrap();
+
+    assert!(!outcome.all_passed);
+    match &outcome.steps[0].result {
+        StepResult::ProviderFailed(msg) => assert!(msg.contains("broken pipe")),
+        other => panic!("expected provider failure, got: {other:?}"),
+    }
+    assert!(outcome.steps[0]
+        .transcript
+        .contains("partial output before pipe failure"));
+}
+
+#[tokio::test]
 async fn execute_steps_writes_transcript_artifacts() {
     let steps = vec![test_steps().remove(0)];
     let run_case = RunCase::new();
