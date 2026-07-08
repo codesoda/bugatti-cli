@@ -177,7 +177,8 @@ async fn main() {
     );
     println!();
 
-    let is_update_command = matches!(&cli.command, Commands::Update { .. });
+    let skip_passive_update_check =
+        matches!(&cli.command, Commands::Update { .. } | Commands::Doctor);
 
     let code = match cli.command {
         Commands::Update { check, yes } => match bugatti::update::run_update(check, yes).await {
@@ -187,6 +188,20 @@ async fn main() {
                 EXIT_CONFIG_ERROR
             }
         },
+        Commands::Init { yes } => {
+            let project_root = std::env::current_dir().unwrap_or_else(|e| {
+                tracing::error!(error = %e, "failed to determine current directory");
+                std::process::exit(EXIT_CONFIG_ERROR);
+            });
+            bugatti::init::run_init(&project_root, yes)
+        }
+        Commands::Doctor => {
+            let project_root = std::env::current_dir().unwrap_or_else(|e| {
+                tracing::error!(error = %e, "failed to determine current directory");
+                std::process::exit(EXIT_CONFIG_ERROR);
+            });
+            bugatti::doctor::run_doctor(&project_root).await
+        }
         Commands::Test {
             path,
             skip_cmds,
@@ -205,6 +220,7 @@ async fn main() {
                 println!("Skipping commands: {}", skip_cmds.join(", "));
             }
             let explicit_config = config_path.as_deref().map(PathBuf::from);
+            let config_sources = config::ConfigSources::process();
             match path {
                 Some(p) => match resolve_test_path(&p) {
                     Some(test_path) => {
@@ -217,6 +233,7 @@ async fn main() {
                             from_checkpoint.as_deref(),
                             verbose,
                             explicit_config.as_deref(),
+                            &config_sources,
                             &provider::initialize_session,
                         )
                         .await;
@@ -258,6 +275,7 @@ async fn main() {
                         from_checkpoint.as_deref(),
                         verbose,
                         explicit_config.as_deref(),
+                        &config_sources,
                         &provider::initialize_session,
                     )
                     .await
@@ -267,7 +285,7 @@ async fn main() {
     };
 
     // Passive version check after successful runs
-    if code == EXIT_OK && !is_update_command {
+    if code == EXIT_OK && !skip_passive_update_check {
         bugatti::update::run_passive_check().await;
     }
 
@@ -288,6 +306,7 @@ async fn run_test_pipeline<F>(
     from_checkpoint: Option<&str>,
     verbose: bool,
     explicit_config: Option<&Path>,
+    config_sources: &config::ConfigSources,
     session_factory: &F,
 ) -> TestRunResult
 where
@@ -296,10 +315,7 @@ where
     let test_name_fallback = test_path.display().to_string();
 
     // Phase 1: Load config
-    let load_result = match explicit_config {
-        Some(path) => config::load_config_from_file(path),
-        None => config::load_config(project_root),
-    };
+    let load_result = config::load_layered_config(project_root, explicit_config, config_sources);
     let global_config = match load_result {
         Ok(c) => c,
         Err(e) => {
@@ -751,6 +767,7 @@ async fn run_discovery<F>(
     from_checkpoint: Option<&str>,
     verbose: bool,
     explicit_config: Option<&Path>,
+    config_sources: &config::ConfigSources,
     session_factory: &F,
 ) -> i32
 where
@@ -814,6 +831,7 @@ where
             from_checkpoint,
             verbose,
             explicit_config,
+            config_sources,
             session_factory,
         )
         .await;
@@ -852,6 +870,7 @@ async fn run_single_test<F>(
     from_checkpoint: Option<&str>,
     verbose: bool,
     explicit_config: Option<&Path>,
+    config_sources: &config::ConfigSources,
     session_factory: &F,
 ) -> TestRunResult
 where
@@ -870,6 +889,7 @@ where
         from_checkpoint,
         verbose,
         explicit_config,
+        config_sources,
         session_factory,
     )
     .await;
@@ -1110,6 +1130,24 @@ mod tests {
     }
 
     #[test]
+    fn test_init_subcommand_yes() {
+        let cli = Cli::parse_from(["bugatti", "init", "--yes"]);
+        match cli.command {
+            bugatti::cli::Commands::Init { yes } => assert!(yes),
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_doctor_subcommand() {
+        let cli = Cli::parse_from(["bugatti", "doctor"]);
+        match cli.command {
+            bugatti::cli::Commands::Doctor => {}
+            _ => panic!("expected Doctor command"),
+        }
+    }
+
+    #[test]
     fn test_help_text_includes_exit_codes() {
         // Verify that exit codes are documented in the CLI help
         let result = Cli::try_parse_from(["bugatti", "--help"]);
@@ -1255,6 +1293,7 @@ instruction = "Second step"
             None,
             false,
             None,
+            &bugatti::config::ConfigSources::hermetic(),
             &session_factory,
         )
         .await;
@@ -1304,6 +1343,7 @@ instruction = "This step never runs"
             None,
             false,
             None,
+            &bugatti::config::ConfigSources::hermetic(),
             &session_factory,
         )
         .await;
@@ -1362,6 +1402,7 @@ instruction = "This step never runs"
             None,
             false,
             None,
+            &bugatti::config::ConfigSources::hermetic(),
             &session_factory,
         )
         .await;
@@ -1432,6 +1473,7 @@ instruction = "Fails"
             None,
             false,
             None,
+            &bugatti::config::ConfigSources::hermetic(),
             &session_factory,
         )
         .await;
@@ -1480,6 +1522,7 @@ instruction = "Passes"
             None,
             false,
             None,
+            &bugatti::config::ConfigSources::hermetic(),
             &session_factory,
         )
         .await;

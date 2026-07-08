@@ -43,6 +43,17 @@ pub enum Commands {
         yes: bool,
     },
 
+    /// Scaffold bugatti.config.toml and an example test file
+    Init {
+        /// Accept defaults (init is currently non-interactive; reserved for
+        /// future prompts)
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// Check environment, config, and test files for problems
+    Doctor,
+
     /// Run tests from a *.test.toml file or discover all root test files
     #[command(after_help = "Docs: https://bugatti.dev/llms/cli-reference.txt")]
     Test {

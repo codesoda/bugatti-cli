@@ -10,6 +10,7 @@
 #
 # Options:
 #   --skip-symlink      Skip creating ~/.local/bin symlink
+#   --print-target      Print the detected release target triple and exit
 #   --help, -h          Show this help message
 #
 # Environment overrides:
@@ -22,7 +23,6 @@ set -eu
 
 REPO_OWNER="${BUGATTI_REPO_OWNER:-codesoda}"
 REPO_NAME="${BUGATTI_REPO_NAME:-bugatti-cli}"
-REPO_REF="${BUGATTI_REPO_REF:-main}"
 
 # --- Color support ---
 
@@ -96,6 +96,7 @@ Usage:
 
 Options:
   --skip-symlink      Skip creating ~/.local/bin symlink
+  --print-target      Print the detected release target triple and exit
   --help, -h          Show this help message
 
 Environment overrides:
@@ -107,12 +108,16 @@ USAGE
 # --- Argument parsing ---
 
 SKIP_SYMLINK=0
+PRINT_TARGET=0
 
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --skip-symlink)
                 SKIP_SYMLINK=1
+                ;;
+            --print-target)
+                PRINT_TARGET=1
                 ;;
             --help|-h)
                 usage
@@ -150,13 +155,23 @@ detect_target() {
     arch="$(uname -m)"
 
     case "$os" in
-        Darwin) ;;
-        *) die "Pre-built binaries are only available for macOS (got $os). Build from a clone instead." ;;
-    esac
-
-    case "$arch" in
-        arm64|aarch64) echo "aarch64-apple-darwin" ;;
-        *) die "Pre-built binaries are only available for arm64 (got $arch). Build from a clone instead." ;;
+        Darwin)
+            case "$arch" in
+                arm64|aarch64) echo "aarch64-apple-darwin" ;;
+                x86_64) echo "x86_64-apple-darwin" ;;
+                *) die "Unsupported macOS architecture: $arch. Build from a clone instead." ;;
+            esac
+            ;;
+        Linux)
+            case "$arch" in
+                x86_64|amd64) echo "x86_64-unknown-linux-gnu" ;;
+                arm64|aarch64) echo "aarch64-unknown-linux-gnu" ;;
+                *) die "Unsupported Linux architecture: $arch. Build from a clone instead." ;;
+            esac
+            ;;
+        *)
+            die "Unsupported OS: $os. Pre-built binaries are available for macOS and Linux; build from a clone instead."
+            ;;
     esac
 }
 
@@ -189,6 +204,8 @@ install_from_release() {
     fi
     ok "Downloaded"
 
+    verify_checksum "$tag" "$asset_name"
+
     tar xzf "$TMP_DIR/$asset_name" -C "$TMP_DIR"
     downloaded_binary="$TMP_DIR/bugatti-${tag}-${target}/bugatti"
     if [ ! -f "$downloaded_binary" ]; then
@@ -196,6 +213,42 @@ install_from_release() {
     fi
 
     install_binary "$downloaded_binary"
+}
+
+# --- Checksum verification ---
+
+# Verify the downloaded tarball against the release's checksums-sha256.txt.
+# Skipped with a warning when no SHA-256 tool or checksum file is available;
+# a checksum file that omits the asset, or a mismatch, is fatal.
+verify_checksum() {
+    vc_tag="$1"
+    vc_asset="$2"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        vc_cmd="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+        vc_cmd="shasum -a 256"
+    else
+        warn "No sha256sum/shasum available - skipping checksum verification"
+        return 0
+    fi
+
+    vc_url="https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/${vc_tag}/checksums-sha256.txt"
+    if ! curl -sSfL "$vc_url" -o "$TMP_DIR/checksums-sha256.txt"; then
+        warn "Could not download checksums-sha256.txt - skipping checksum verification"
+        return 0
+    fi
+
+    vc_expected="$(awk -v name="$vc_asset" '$2 == name { print $1 }' "$TMP_DIR/checksums-sha256.txt")"
+    if [ -z "$vc_expected" ]; then
+        die "checksums-sha256.txt does not list $vc_asset"
+    fi
+
+    vc_actual="$(cd "$TMP_DIR" && $vc_cmd "$vc_asset" | awk '{ print $1 }')"
+    if [ "$vc_expected" != "$vc_actual" ]; then
+        die "Checksum mismatch for $vc_asset (expected $vc_expected, got $vc_actual)"
+    fi
+    ok "Checksum verified"
 }
 
 # --- Build from local source ---
@@ -321,6 +374,11 @@ print_summary() {
 
 main() {
     parse_args "$@"
+
+    if [ "$PRINT_TARGET" = 1 ]; then
+        detect_target
+        exit 0
+    fi
 
     printf '\n%b%bBugatti Installer%b\n' "$C_BOLD" "$C_HEADER" "$C_RESET"
     dim "━━━━━━━━━━━━━━━━━"
