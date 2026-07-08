@@ -338,7 +338,7 @@ impl AgentSession for ClaudeCodeAdapter {
 /// Reads JSONL from stdout, parsing each line into `OutputChunk` values.
 /// Yields `OutputChunk::Done` when a `result` event is received (turn complete).
 /// The process stays alive for the next message.
-struct StreamTurnStream<'a, R: AsyncBufRead + Unpin + Send> {
+struct StreamTurnStream<'a, R> {
     reader: &'a mut R,
     done: bool,
     verbose: bool,
@@ -723,8 +723,9 @@ mod tests {
 
         match stream.next_chunk().await {
             Some(Err(ProviderError::StreamError(msg))) => {
+                // Assert on our own message prefix only; the io::Error Display
+                // text for BrokenPipe is platform-dependent.
                 assert!(msg.contains("failed to read from claude CLI stdout"));
-                assert!(msg.contains("broken pipe"));
             }
             other => panic!("expected StreamError on broken pipe, got: {other:?}"),
         }
