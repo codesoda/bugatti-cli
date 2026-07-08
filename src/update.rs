@@ -714,10 +714,14 @@ async fn passive_version_check() {
         return;
     }
 
-    // Always update timestamp after attempt (prevents retry storms)
+    // Record the attempt *before* the network call (prevents retry storms).
+    // The outer deadline in `run_passive_check` may cancel this future while
+    // the HTTP request is in flight; writing the timestamp first guarantees
+    // a hung network can't cause every subsequent run to retry (and pay the
+    // full deadline) again.
+    write_last_check_timestamp();
     let check_result =
         check_latest_version(GITHUB_RELEASES_LATEST_URL, PASSIVE_CHECK_TIMEOUT).await;
-    write_last_check_timestamp();
 
     let release = match check_result {
         Ok(r) => r,
@@ -757,8 +761,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn deadline_abandons_hung_future() {
         // A future that never completes must not block past the deadline.
+        let start = tokio::time::Instant::now();
         run_with_deadline(std::future::pending::<()>(), Duration::from_secs(3)).await;
-        // Reaching here proves the deadline fired (paused clock auto-advances).
+        // Paused clock auto-advances exactly to the deadline: reaching here
+        // proves the timeout fired, and the elapsed check pins its value.
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
     }
 
     #[tokio::test(start_paused = true)]
