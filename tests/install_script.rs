@@ -46,7 +46,7 @@ fn write_fake_uname(dir: &Path, os: &str, arch: &str) {
     fs::set_permissions(&uname_path, permissions).unwrap();
 }
 
-fn print_target_with_uname(os: &str, arch: &str) -> String {
+fn run_print_target(os: &str, arch: &str) -> std::process::Output {
     let temp_dir = TempDir::new(&format!("{os}-{arch}"));
     write_fake_uname(temp_dir.path(), os, arch);
 
@@ -55,12 +55,16 @@ fn print_target_with_uname(os: &str, arch: &str) -> String {
     path.push(env::var_os("PATH").unwrap_or_default());
 
     let install_script = Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh");
-    let output = Command::new("sh")
+    Command::new("sh")
         .arg(install_script)
         .arg("--print-target")
         .env("PATH", path)
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+fn print_target_with_uname(os: &str, arch: &str) -> String {
+    let output = run_print_target(os, arch);
 
     assert!(
         output.status.success(),
@@ -83,5 +87,28 @@ fn install_script_detects_supported_release_targets() {
 
     for (os, arch, expected) in cases {
         assert_eq!(print_target_with_uname(os, arch), expected);
+    }
+}
+
+#[test]
+fn install_script_rejects_unsupported_platforms() {
+    let cases = [
+        ("FreeBSD", "amd64", "Unsupported OS"),
+        ("Linux", "riscv64", "Unsupported"),
+        ("Darwin", "i386", "Unsupported"),
+    ];
+
+    for (os, arch, expected_message) in cases {
+        let output = run_print_target(os, arch);
+        assert!(
+            !output.status.success(),
+            "expected failure for {os}/{arch}, got success with stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(expected_message),
+            "expected '{expected_message}' in stderr for {os}/{arch}, got: {stderr}"
+        );
     }
 }

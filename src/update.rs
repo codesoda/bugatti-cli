@@ -813,18 +813,11 @@ mod tests {
         assert!(parse_checksums("notahash filename").is_err());
     }
 
+    // Deliberately not cfg-gated: on a target outside the release matrix this
+    // test FAILS, which is the signal to either add the target to release.yml
+    // or extend the known list. A cfg gate would make the test tautological
+    // (only compiled where it passes by construction).
     #[test]
-    #[cfg(any(
-        all(
-            target_os = "macos",
-            any(target_arch = "aarch64", target_arch = "x86_64")
-        ),
-        all(
-            target_os = "linux",
-            target_env = "gnu",
-            any(target_arch = "aarch64", target_arch = "x86_64")
-        )
-    ))]
     fn build_target_is_known_release_target() {
         let known = [
             "aarch64-apple-darwin",

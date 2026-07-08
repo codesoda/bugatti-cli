@@ -5,8 +5,9 @@ on:
     tags:
       - "v*"
 
+# Least privilege by default; only the release job needs write access.
 permissions:
-  contents: write
+  contents: read
 
 env:
   RUSTFLAGS: "-D warnings"
@@ -39,10 +40,13 @@ jobs:
             os: macos-latest
           - target: x86_64-apple-darwin
             os: macos-latest
+          # Pin Linux builds to the oldest supported LTS so released binaries
+          # link against an older glibc and run on Ubuntu 22.04 / Debian 12 /
+          # RHEL 9 era distros.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
 
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +83,8 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
