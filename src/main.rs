@@ -152,15 +152,20 @@ struct TestRunResult {
 async fn main() {
     init_cli_tracing();
 
-    // Install Ctrl+C handler for graceful interruption.
-    // The handler sets a flag; the run loop checks it between steps.
+    // Install a Ctrl+C listener for graceful interruption.
+    // The listener sets a flag; the run loop checks it between steps.
     let interrupted = Arc::new(AtomicBool::new(false));
     {
         let interrupted = interrupted.clone();
-        let _ = ctrlc::set_handler(move || {
-            eprintln!("\nInterrupted (Ctrl+C). Attempting best-effort cleanup...");
-            interrupted.store(true, Ordering::Relaxed);
-            INTERRUPTED.store(true, Ordering::Relaxed);
+        tokio::spawn(async move {
+            loop {
+                if tokio::signal::ctrl_c().await.is_err() {
+                    break;
+                }
+                eprintln!("\nInterrupted (Ctrl+C). Attempting best-effort cleanup...");
+                interrupted.store(true, Ordering::Relaxed);
+                INTERRUPTED.store(true, Ordering::Relaxed);
+            }
         });
     }
 

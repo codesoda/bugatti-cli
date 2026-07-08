@@ -161,6 +161,11 @@ pub enum UpdateError {
         #[source]
         source: io::Error,
     },
+    #[error("blocking update task failed: {source}")]
+    BlockingTaskJoin {
+        #[source]
+        source: tokio::task::JoinError,
+    },
     #[error("failed to set executable permissions: {source}")]
     SetPermissions {
         #[source]
@@ -514,7 +519,7 @@ fn self_replace_binary(replacement_path: &Path) -> Result<(), UpdateError> {
 // ---------------------------------------------------------------------------
 
 /// Simple y/N confirmation prompt.
-fn confirm_update(local: &str, remote: &str) -> bool {
+fn confirm_update_blocking(local: &str, remote: &str) -> bool {
     print!("Update bugatti v{local} → v{remote}? [y/N] ");
     let _ = io::stdout().flush();
 
@@ -523,6 +528,52 @@ fn confirm_update(local: &str, remote: &str) -> bool {
         return false;
     }
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// Prompts for update confirmation without blocking a Tokio worker thread.
+async fn confirm_update(local: &str, remote: &str) -> bool {
+    let local = local.to_string();
+    let remote = remote.to_string();
+
+    tokio::task::spawn_blocking(move || confirm_update_blocking(&local, &remote))
+        .await
+        .unwrap_or(false)
+}
+
+/// Verifies, extracts, secures, and installs a downloaded update artifact off the async runtime.
+async fn install_downloaded_artifact(
+    checksums_path: PathBuf,
+    artifact_name: String,
+    artifact_path: PathBuf,
+    extract_dir: PathBuf,
+) -> Result<(), UpdateError> {
+    tokio::task::spawn_blocking(move || {
+        let checksums_content = std::fs::read_to_string(&checksums_path)
+            .map_err(|source| UpdateError::ChecksumRead { source })?;
+        let checksums = parse_checksums(&checksums_content)?;
+        verify_checksum(&checksums, &artifact_name, &artifact_path)?;
+
+        println!("Checksum verified ✓");
+
+        std::fs::create_dir_all(&extract_dir)
+            .map_err(|source| UpdateError::CreateExtractionDir { source })?;
+        let new_binary = extract_binary(&artifact_path, &extract_dir)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(&new_binary, perms)
+                .map_err(|source| UpdateError::SetPermissions { source })?;
+        }
+
+        secure_binary(&new_binary);
+        self_replace_binary(&new_binary)?;
+
+        Ok(())
+    })
+    .await
+    .map_err(|source| UpdateError::BlockingTaskJoin { source })?
 }
 
 // ---------------------------------------------------------------------------
@@ -588,7 +639,7 @@ async fn run_update_install(yes: bool) -> Result<(), UpdateError> {
     }
 
     // Step 3: Prompt for confirmation
-    if !yes && !confirm_update(local, remote) {
+    if !yes && !confirm_update(local, remote).await {
         println!("Update cancelled.");
         return Ok(());
     }
@@ -605,38 +656,14 @@ async fn run_update_install(yes: bool) -> Result<(), UpdateError> {
         .artifact_url
         .rsplit('/')
         .next()
-        .unwrap_or("artifact.tar.gz");
+        .unwrap_or("artifact.tar.gz")
+        .to_string();
     let artifact_path =
-        download_to_file(&release.artifact_url, tmp_dir.path(), artifact_name).await?;
+        download_to_file(&release.artifact_url, tmp_dir.path(), &artifact_name).await?;
 
-    // Step 5: Verify checksum
-    let checksums_content = std::fs::read_to_string(&checksums_path)
-        .map_err(|source| UpdateError::ChecksumRead { source })?;
-    let checksums = parse_checksums(&checksums_content)?;
-    verify_checksum(&checksums, artifact_name, &artifact_path)?;
-
-    println!("Checksum verified ✓");
-
-    // Step 6: Extract binary
+    // Step 5-9: Verify checksum, extract, secure, and replace without blocking Tokio workers.
     let extract_dir = tmp_dir.path().join("extracted");
-    std::fs::create_dir_all(&extract_dir)
-        .map_err(|source| UpdateError::CreateExtractionDir { source })?;
-    let new_binary = extract_binary(&artifact_path, &extract_dir)?;
-
-    // Step 7: Set executable permissions
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&new_binary, perms)
-            .map_err(|source| UpdateError::SetPermissions { source })?;
-    }
-
-    // Step 8: macOS binary security (quarantine removal + adhoc codesign)
-    secure_binary(&new_binary);
-
-    // Step 9: Replace running binary
-    self_replace_binary(&new_binary)?;
+    install_downloaded_artifact(checksums_path, artifact_name, artifact_path, extract_dir).await?;
 
     println!("Successfully updated bugatti v{local} → v{remote}");
 
@@ -835,6 +862,36 @@ mod tests {
         assert_eq!(
             repo_base_from_url("http://localhost:8080"),
             "http://localhost:8080"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_downloaded_artifact_surfaces_checksum_mismatch_from_blocking_task() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let artifact_name = "bugatti-test.tar.gz";
+        let artifact_path = tmp_dir.path().join(artifact_name);
+        let checksums_path = tmp_dir.path().join("checksums-sha256.txt");
+        let extract_dir = tmp_dir.path().join("extracted");
+
+        std::fs::write(&artifact_path, b"not the expected artifact").unwrap();
+        std::fs::write(
+            &checksums_path,
+            format!("{}  {artifact_name}\n", "0".repeat(64)),
+        )
+        .unwrap();
+
+        let err = install_downloaded_artifact(
+            checksums_path,
+            artifact_name.to_string(),
+            artifact_path,
+            extract_dir,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, UpdateError::ChecksumMismatch { .. }),
+            "expected checksum mismatch, got {err:?}"
         );
     }
 }

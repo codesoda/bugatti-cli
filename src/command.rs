@@ -3,6 +3,7 @@ use crate::progress::{ProgressReporter, STDOUT_PROGRESS_REPORTER};
 use crate::run::ArtifactDir;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 
@@ -537,15 +538,24 @@ async fn poll_readiness(url: &str, timeout: Duration) -> Result<(), String> {
     ))
 }
 
-/// Check if a URL is reachable by attempting a simple HTTP GET via a spawned curl process.
+/// Check if an HTTP(S) URL is reachable by attempting a GET request.
 async fn check_url(url: &str) -> bool {
-    Command::new("curl")
-        .args(["-sf", "--max-time", "2", "-o", "/dev/null", url])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+
+    let Some(client) = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .ok()
+    }) else {
+        return false;
+    };
+
+    client
+        .get(url)
+        .send()
         .await
-        .map(|s| s.success())
+        .map(|response| response.status().is_success())
         .unwrap_or(false)
 }
 
@@ -651,6 +661,8 @@ mod tests {
     use crate::test_support as common;
     use indexmap::IndexMap;
     use std::sync::Mutex;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
 
     #[derive(Default)]
     struct RecordingReporter {
@@ -699,6 +711,43 @@ mod tests {
             commands: map,
             checkpoint: None,
         }
+    }
+
+    async fn one_shot_http_server(status_line: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let response =
+                format!("HTTP/1.1 {status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        format!("http://{addr}/ready")
+    }
+
+    #[tokio::test]
+    async fn check_url_returns_true_for_200() {
+        let url = one_shot_http_server("200 OK").await;
+
+        assert!(check_url(&url).await);
+    }
+
+    #[tokio::test]
+    async fn check_url_returns_false_for_500() {
+        let url = one_shot_http_server("500 Internal Server Error").await;
+
+        assert!(!check_url(&url).await);
+    }
+
+    #[tokio::test]
+    async fn check_url_returns_false_for_unreachable() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        assert!(!check_url(&format!("http://{addr}/ready")).await);
     }
 
     #[tokio::test]
