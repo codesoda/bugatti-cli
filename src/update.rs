@@ -859,6 +859,25 @@ mod tests {
         assert!(parse_checksums("notahash filename").is_err());
     }
 
+    // Deliberately not cfg-gated: on a target outside the release matrix this
+    // test FAILS, which is the signal to either add the target to release.yml
+    // or extend the known list. A cfg gate would make the test tautological
+    // (only compiled where it passes by construction).
+    #[test]
+    fn build_target_is_known_release_target() {
+        let known = [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+        ];
+        assert!(
+            known.contains(&build_target()),
+            "TARGET '{}' is not in the release matrix — update release.yml",
+            build_target()
+        );
+    }
+
     #[test]
     fn build_release_metadata_constructs_urls() {
         let meta = build_release_metadata("v0.3.1", "https://github.com/codesoda/bugatti-cli");
