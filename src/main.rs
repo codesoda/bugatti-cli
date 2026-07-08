@@ -296,10 +296,7 @@ where
     let test_name_fallback = test_path.display().to_string();
 
     // Phase 1: Load config
-    let load_result = match explicit_config {
-        Some(path) => config::load_config_from_file(path),
-        None => config::load_config(project_root),
-    };
+    let load_result = config::load_layered_config(project_root, explicit_config);
     let global_config = match load_result {
         Ok(c) => c,
         Err(e) => {
