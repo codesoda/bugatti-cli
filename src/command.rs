@@ -373,14 +373,32 @@ impl TrackedProcess {
     }
 }
 
+/// RAII cleanup for tracked processes that were dropped without teardown
+/// (typically on panic or an early-return bug).
+///
+/// Note: this uses blocking sleeps (up to ~`DROP_KILL_GRACE` + 500ms) because
+/// `Drop` cannot be async. That is acceptable for the panic/bug path it
+/// guards; the normal shutdown path is the async `teardown_processes`, which
+/// sets `cleaned_up` and makes this a no-op.
 impl Drop for TrackedProcess {
     fn drop(&mut self) {
         if self.cleaned_up {
             return;
         }
 
+        #[cfg(unix)]
+        let initial_pid = self.child.id();
+
         match self.child.try_wait() {
-            Ok(Some(_)) => return,
+            Ok(Some(_)) => {
+                // The leader exited on its own, but descendants in its
+                // process group may linger; sweep them.
+                #[cfg(unix)]
+                if let Some(pid) = initial_pid {
+                    kill_remaining_group_members(pid);
+                }
+                return;
+            }
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(
@@ -388,6 +406,12 @@ impl Drop for TrackedProcess {
                     error = %e,
                     "failed to check process status during RAII cleanup"
                 );
+                // Best effort: don't leak the group just because the status
+                // probe failed.
+                #[cfg(unix)]
+                if let Some(pid) = initial_pid {
+                    signal_process_group_or_child(pid, libc::SIGKILL);
+                }
                 return;
             }
         }
@@ -407,7 +431,14 @@ impl Drop for TrackedProcess {
             let deadline = Instant::now() + DROP_KILL_GRACE;
             while Instant::now() < deadline {
                 match self.child.try_wait() {
-                    Ok(Some(_)) => return,
+                    Ok(Some(_)) => {
+                        // The leader honored SIGTERM, but SIGTERM-ignoring
+                        // descendants may survive; sweep the group.
+                        if let Some(pid) = child_pid {
+                            kill_remaining_group_members(pid);
+                        }
+                        return;
+                    }
                     Ok(None) => std::thread::sleep(DROP_POLL_INTERVAL),
                     Err(e) => {
                         tracing::warn!(
@@ -415,6 +446,9 @@ impl Drop for TrackedProcess {
                             error = %e,
                             "failed to wait during RAII cleanup"
                         );
+                        if let Some(pid) = child_pid {
+                            signal_process_group_or_child(pid, libc::SIGKILL);
+                        }
                         return;
                     }
                 }
@@ -470,6 +504,33 @@ fn signal_process_group_or_child(pid: u32, signal: libc::c_int) {
     }
 }
 
+/// Force-kill any surviving members of the child's process group after the
+/// group leader has already exited.
+///
+/// Probes with signal 0 first: once the last member is gone the group id is
+/// invalid and the probe fails with ESRCH, so nothing is sent. (There is a
+/// theoretical pgid-reuse window between probe and kill; it requires the
+/// whole group to vanish *and* the kernel to hand the same id to a new group
+/// within microseconds, which we accept for this cleanup-of-last-resort.)
+#[cfg(unix)]
+fn kill_remaining_group_members(pid: u32) {
+    let pgid = pid as libc::pid_t;
+    // SAFETY: plain libc::kill calls on a process-group id derived from a pid
+    // we spawned; signal 0 performs existence/permission checking only.
+    unsafe {
+        if libc::kill(-pgid, 0) == 0 {
+            tracing::warn!(
+                pgid,
+                "process group members survived leader exit; sending SIGKILL to group"
+            );
+            let _ = libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+}
+
+/// How long to wait for the OS to reap a child after SIGKILL before giving up.
+const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Attempt graceful process shutdown, then escalate to a force kill after `grace`.
 pub async fn graceful_kill(child: &mut Child, grace: Duration) -> KillOutcome {
     match child.try_wait() {
@@ -495,7 +556,15 @@ pub async fn graceful_kill(child: &mut Child, grace: Duration) -> KillOutcome {
     }
 
     match tokio::time::timeout(grace, child.wait()).await {
-        Ok(Ok(status)) => KillOutcome::Terminated(status.code()),
+        Ok(Ok(status)) => {
+            // The leader exited within the grace period, but descendants that
+            // ignore SIGTERM may survive in the process group; sweep them.
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                kill_remaining_group_members(pid);
+            }
+            KillOutcome::Terminated(status.code())
+        }
         Ok(Err(e)) => KillOutcome::WaitError(e.to_string()),
         Err(_) => {
             #[cfg(unix)]
@@ -505,9 +574,15 @@ pub async fn graceful_kill(child: &mut Child, grace: Duration) -> KillOutcome {
                 }
             }
             let _ = child.start_kill();
-            match child.wait().await {
-                Ok(_) => KillOutcome::ForceKilled,
-                Err(e) => KillOutcome::WaitError(e.to_string()),
+            // Bound the post-SIGKILL reap: an unkillable (e.g. D-state)
+            // process must not hang teardown forever.
+            match tokio::time::timeout(KILL_REAP_TIMEOUT, child.wait()).await {
+                Ok(Ok(_)) => KillOutcome::ForceKilled,
+                Ok(Err(e)) => KillOutcome::WaitError(e.to_string()),
+                Err(_) => KillOutcome::WaitError(format!(
+                    "child did not exit within {}s of SIGKILL",
+                    KILL_REAP_TIMEOUT.as_secs()
+                )),
             }
         }
     }
@@ -1173,6 +1248,37 @@ mod tests {
         assert!(
             wait_until_process_group_gone(pid, Duration::from_secs(3)).await,
             "process group {pid} should be gone after teardown"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminated_leader_still_sweeps_sigterm_ignoring_grandchild() {
+        // The direct child (sh) honors SIGTERM and exits within the grace
+        // period, but its grandchild ignores SIGTERM. graceful_kill must
+        // still sweep the surviving group members with SIGKILL.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("perl -e '$SIG{TERM}=\"IGNORE\"; sleep 600' & wait")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd.process_group(0);
+
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id().unwrap();
+        // Give the shell a moment to fork the grandchild.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let outcome = graceful_kill(&mut child, Duration::from_secs(2)).await;
+
+        assert_eq!(
+            std::mem::discriminant(&outcome),
+            std::mem::discriminant(&KillOutcome::Terminated(None)),
+            "sh should honor SIGTERM within grace, got: {outcome:?}"
+        );
+        assert!(
+            wait_until_process_group_gone(pid, Duration::from_secs(3)).await,
+            "SIGTERM-ignoring grandchild in group {pid} should be swept after leader exit"
         );
     }
 

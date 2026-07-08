@@ -161,6 +161,12 @@ impl ClaudeCodeAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Put claude in its own process group so graceful_kill's group signals
+        // reach descendants it spawns (MCP servers, browsers, tools) — not just
+        // the direct child.
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         if self.verbose {
             let c = output::stderr_colors();
             let args: Vec<_> = cmd
@@ -634,7 +640,8 @@ mod tests {
     #[tokio::test]
     async fn close_sigterms_process_that_ignores_eof() {
         let tmp = tempfile::tempdir().unwrap();
-        let script = write_executable_script(tmp.path(), "fake-claude", "#!/bin/sh\nsleep 300\n");
+        let script =
+            write_executable_script(tmp.path(), "fake-claude", "#!/bin/sh\nexec sleep 300\n");
         let mut adapter = ClaudeCodeAdapter {
             binary_path: script,
             agent_args: vec![],
