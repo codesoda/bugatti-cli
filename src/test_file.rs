@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// A parsed test file loaded from a *.test.toml file.
@@ -29,6 +30,8 @@ struct RawTestFile {
 pub struct TestOverrides {
     #[serde(default)]
     pub provider: Option<ProviderOverrides>,
+    #[serde(default)]
+    pub commands: Option<BTreeMap<String, CommandOverrides>>,
 }
 
 /// Provider-level overrides for a single test.
@@ -40,6 +43,16 @@ pub struct ProviderOverrides {
     pub agent_args: Option<Vec<String>>,
     pub step_timeout_secs: Option<u64>,
     pub base_url: Option<String>,
+}
+
+/// Command-level overrides for a single test.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CommandOverrides {
+    pub cmd: Option<String>,
+    pub readiness_url: Option<String>,
+    pub readiness_urls: Option<Vec<String>>,
+    pub readiness_timeout_secs: Option<u64>,
 }
 
 /// A single step in a test file — either an instruction or an include.
@@ -264,6 +277,89 @@ instruction = "Do something"
         assert_eq!(provider.name.as_deref(), Some("openai"));
         assert_eq!(provider.extra_system_prompt.as_deref(), Some("Be brief"));
         assert!(provider.agent_args.is_none());
+    }
+
+    #[test]
+    fn parse_command_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("commands.test.toml");
+        fs::write(
+            &path,
+            r#"
+name = "Command override test"
+
+[overrides.commands.server]
+cmd = "cargo run --bin alt-server"
+readiness_timeout_secs = 10
+
+[[steps]]
+instruction = "Do something"
+"#,
+        )
+        .unwrap();
+
+        let test_file = parse_test_file(&path).unwrap();
+        let overrides = test_file.overrides.unwrap();
+        let commands = overrides.commands.unwrap();
+        let server = commands.get("server").unwrap();
+        assert_eq!(server.cmd.as_deref(), Some("cargo run --bin alt-server"));
+        assert_eq!(server.readiness_timeout_secs, Some(10));
+        assert!(server.readiness_url.is_none());
+    }
+
+    #[test]
+    fn parse_multiple_command_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("commands.test.toml");
+        fs::write(
+            &path,
+            r#"
+[overrides.commands.server]
+cmd = "cargo run --bin alt-server"
+
+[overrides.commands.worker]
+readiness_urls = ["http://localhost:4000/ready"]
+
+[[steps]]
+instruction = "Do something"
+"#,
+        )
+        .unwrap();
+
+        let test_file = parse_test_file(&path).unwrap();
+        let commands = test_file.overrides.unwrap().commands.unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands["server"].cmd.as_deref(),
+            Some("cargo run --bin alt-server")
+        );
+        assert_eq!(
+            commands["worker"].readiness_urls,
+            Some(vec!["http://localhost:4000/ready".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_command_override_rejects_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad-command-override.test.toml");
+        fs::write(
+            &path,
+            r#"
+[overrides.commands.server]
+kind = "short_lived"
+cmd = "echo no"
+
+[[steps]]
+instruction = "Do something"
+"#,
+        )
+        .unwrap();
+
+        let err = parse_test_file(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("failed to parse test file"));
+        assert!(msg.contains("unknown field `kind`"), "got: {msg}");
     }
 
     #[test]

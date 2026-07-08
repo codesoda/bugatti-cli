@@ -220,6 +220,7 @@ async fn main() {
                 println!("Skipping commands: {}", skip_cmds.join(", "));
             }
             let explicit_config = config_path.as_deref().map(PathBuf::from);
+            let config_sources = config::ConfigSources::process();
             match path {
                 Some(p) => match resolve_test_path(&p) {
                     Some(test_path) => {
@@ -232,6 +233,7 @@ async fn main() {
                             from_checkpoint.as_deref(),
                             verbose,
                             explicit_config.as_deref(),
+                            &config_sources,
                             &provider::initialize_session,
                         )
                         .await;
@@ -273,6 +275,7 @@ async fn main() {
                         from_checkpoint.as_deref(),
                         verbose,
                         explicit_config.as_deref(),
+                        &config_sources,
                         &provider::initialize_session,
                     )
                     .await
@@ -303,6 +306,7 @@ async fn run_test_pipeline<F>(
     from_checkpoint: Option<&str>,
     verbose: bool,
     explicit_config: Option<&Path>,
+    config_sources: &config::ConfigSources,
     session_factory: &F,
 ) -> TestRunResult
 where
@@ -311,10 +315,7 @@ where
     let test_name_fallback = test_path.display().to_string();
 
     // Phase 1: Load config
-    let load_result = match explicit_config {
-        Some(path) => config::load_config_from_file(path),
-        None => config::load_config(project_root),
-    };
+    let load_result = config::load_layered_config(project_root, explicit_config, config_sources);
     let global_config = match load_result {
         Ok(c) => c,
         Err(e) => {
@@ -766,6 +767,7 @@ async fn run_discovery<F>(
     from_checkpoint: Option<&str>,
     verbose: bool,
     explicit_config: Option<&Path>,
+    config_sources: &config::ConfigSources,
     session_factory: &F,
 ) -> i32
 where
@@ -829,6 +831,7 @@ where
             from_checkpoint,
             verbose,
             explicit_config,
+            config_sources,
             session_factory,
         )
         .await;
@@ -867,6 +870,7 @@ async fn run_single_test<F>(
     from_checkpoint: Option<&str>,
     verbose: bool,
     explicit_config: Option<&Path>,
+    config_sources: &config::ConfigSources,
     session_factory: &F,
 ) -> TestRunResult
 where
@@ -885,6 +889,7 @@ where
         from_checkpoint,
         verbose,
         explicit_config,
+        config_sources,
         session_factory,
     )
     .await;
@@ -1288,6 +1293,7 @@ instruction = "Second step"
             None,
             false,
             None,
+            &bugatti::config::ConfigSources::hermetic(),
             &session_factory,
         )
         .await;
@@ -1337,6 +1343,7 @@ instruction = "This step never runs"
             None,
             false,
             None,
+            &bugatti::config::ConfigSources::hermetic(),
             &session_factory,
         )
         .await;
@@ -1395,6 +1402,7 @@ instruction = "This step never runs"
             None,
             false,
             None,
+            &bugatti::config::ConfigSources::hermetic(),
             &session_factory,
         )
         .await;
@@ -1465,6 +1473,7 @@ instruction = "Fails"
             None,
             false,
             None,
+            &bugatti::config::ConfigSources::hermetic(),
             &session_factory,
         )
         .await;
@@ -1513,6 +1522,7 @@ instruction = "Passes"
             None,
             false,
             None,
+            &bugatti::config::ConfigSources::hermetic(),
             &session_factory,
         )
         .await;
