@@ -8,8 +8,19 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
+
+#[cfg(not(test))]
+const CLOSE_EOF_GRACE: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const CLOSE_EOF_GRACE: Duration = Duration::from_millis(200);
+
+#[cfg(not(test))]
+const CLOSE_KILL_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const CLOSE_KILL_GRACE: Duration = Duration::from_millis(200);
 
 /// Claude Code CLI provider adapter.
 ///
@@ -145,9 +156,16 @@ impl ClaudeCodeAdapter {
             cmd.arg("--append-system-prompt-file").arg(&prompt_path);
         }
 
-        cmd.stdin(Stdio::piped())
+        cmd.kill_on_drop(true)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        // Put claude in its own process group so graceful_kill's group signals
+        // reach descendants it spawns (MCP servers, browsers, tools) — not just
+        // the direct child.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         if self.verbose {
             let c = output::stderr_colors();
@@ -319,12 +337,17 @@ impl AgentSession for ClaudeCodeAdapter {
         self.reader.take();
 
         if let Some(mut child) = self.child.take() {
-            match child.wait().await {
-                Ok(status) => {
+            match tokio::time::timeout(CLOSE_EOF_GRACE, child.wait()).await {
+                Ok(Ok(status)) => {
                     tracing::info!(exit_status = %status, "claude process exited");
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(error = %e, "failed to wait for claude process");
+                }
+                Err(_) => {
+                    tracing::warn!("claude process ignored EOF; escalating to SIGTERM/SIGKILL");
+                    let outcome = crate::command::graceful_kill(&mut child, CLOSE_KILL_GRACE).await;
+                    tracing::warn!(?outcome, "claude process shutdown escalated");
                 }
             }
         }
@@ -534,6 +557,36 @@ mod tests {
     use super::*;
     use crate::config::{Config, ProviderConfig};
     use indexmap::IndexMap;
+    #[cfg(unix)]
+    use std::time::Instant;
+
+    #[cfg(unix)]
+    fn write_executable_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    async fn wait_until_process_gone(pid: u32, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            // SAFETY: signal 0 checks process existence without delivering a signal.
+            let exists = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+            if !exists {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // SAFETY: signal 0 checks process existence without delivering a signal.
+        unsafe { libc::kill(pid as libc::pid_t, 0) != 0 }
+    }
+
     use std::io;
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -609,6 +662,75 @@ mod tests {
         assert!(adapter.child.is_none());
         assert!(adapter.stdin.is_none());
         assert!(adapter.reader.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_sigterms_process_that_ignores_eof() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script =
+            write_executable_script(tmp.path(), "fake-claude", "#!/bin/sh\nexec sleep 300\n");
+        let mut adapter = ClaudeCodeAdapter {
+            binary_path: script,
+            agent_args: vec![],
+            artifact_dir: tmp.path().to_path_buf(),
+            child: None,
+            stdin: None,
+            reader: None,
+            verbose: false,
+            bootstrap_content: None,
+        };
+
+        adapter.ensure_started().unwrap();
+        let pid = adapter.child.as_ref().unwrap().id().unwrap();
+        let start = Instant::now();
+
+        adapter.close().await.unwrap();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "close should escalate promptly when EOF is ignored"
+        );
+        assert!(
+            wait_until_process_gone(pid, Duration::from_secs(3)).await,
+            "claude pid {pid} should be gone after close"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_kills_process_that_ignores_eof_and_sigterm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = write_executable_script(
+            tmp.path(),
+            "fake-claude",
+            "#!/bin/sh\nexec perl -e '$SIG{TERM}=\"IGNORE\"; sleep 300'\n",
+        );
+        let mut adapter = ClaudeCodeAdapter {
+            binary_path: script,
+            agent_args: vec![],
+            artifact_dir: tmp.path().to_path_buf(),
+            child: None,
+            stdin: None,
+            reader: None,
+            verbose: false,
+            bootstrap_content: None,
+        };
+
+        adapter.ensure_started().unwrap();
+        let pid = adapter.child.as_ref().unwrap().id().unwrap();
+        let start = Instant::now();
+
+        adapter.close().await.unwrap();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "close should force-kill promptly when EOF and SIGTERM are ignored"
+        );
+        assert!(
+            wait_until_process_gone(pid, Duration::from_secs(3)).await,
+            "claude pid {pid} should be gone after close"
+        );
     }
 
     #[test]
