@@ -531,13 +531,16 @@ fn confirm_update_blocking(local: &str, remote: &str) -> bool {
 }
 
 /// Prompts for update confirmation without blocking a Tokio worker thread.
-async fn confirm_update(local: &str, remote: &str) -> bool {
+///
+/// A join failure (panic in the blocking prompt task) is surfaced as an error
+/// rather than silently treated as "declined".
+async fn confirm_update(local: &str, remote: &str) -> Result<bool, UpdateError> {
     let local = local.to_string();
     let remote = remote.to_string();
 
     tokio::task::spawn_blocking(move || confirm_update_blocking(&local, &remote))
         .await
-        .unwrap_or(false)
+        .map_err(|source| UpdateError::BlockingTaskJoin { source })
 }
 
 /// Verifies, extracts, secures, and installs a downloaded update artifact off the async runtime.
@@ -639,7 +642,7 @@ async fn run_update_install(yes: bool) -> Result<(), UpdateError> {
     }
 
     // Step 3: Prompt for confirmation
-    if !yes && !confirm_update(local, remote).await {
+    if !yes && !confirm_update(local, remote).await? {
         println!("Update cancelled.");
         return Ok(());
     }

@@ -546,6 +546,11 @@ async fn check_url(url: &str) -> bool {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()
+            .inspect_err(|e| {
+                // Cached forever by the OnceLock: without this log every
+                // readiness poll would silently fail until timeout.
+                tracing::warn!(error = %e, "failed to build readiness HTTP client; readiness checks will fail");
+            })
             .ok()
     }) else {
         return false;

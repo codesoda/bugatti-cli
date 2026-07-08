@@ -1,7 +1,6 @@
 use clap::Parser;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use bugatti::cli::{Cli, Commands};
 use bugatti::command::{self, TrackedProcess};
@@ -131,6 +130,45 @@ pub fn is_interrupted() -> bool {
     INTERRUPTED.load(Ordering::Relaxed)
 }
 
+/// Install the SIGINT/Ctrl+C listener that flags interruption for the run loop.
+///
+/// On Unix the signal stream is registered eagerly (before the task is first
+/// polled) so there is no startup window where Ctrl+C falls through to the
+/// default terminate action, and stream errors are logged rather than leaving
+/// tokio's process-wide handler installed with nobody setting the flag.
+fn install_interrupt_handler() {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
+            Ok(mut stream) => {
+                tokio::spawn(async move {
+                    while stream.recv().await.is_some() {
+                        eprintln!("\nInterrupted (Ctrl+C). Attempting best-effort cleanup...");
+                        INTERRUPTED.store(true, Ordering::Relaxed);
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to install Ctrl+C handler; interruption disabled");
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = tokio::signal::ctrl_c().await {
+                    tracing::error!(error = %e, "Ctrl+C listener failed; interruption disabled");
+                    return;
+                }
+                eprintln!("\nInterrupted (Ctrl+C). Attempting best-effort cleanup...");
+                INTERRUPTED.store(true, Ordering::Relaxed);
+            }
+        });
+    }
+}
+
 /// Outcome of running a single root test file.
 #[derive(Debug)]
 struct TestRunResult {
@@ -154,20 +192,7 @@ async fn main() {
 
     // Install a Ctrl+C listener for graceful interruption.
     // The listener sets a flag; the run loop checks it between steps.
-    let interrupted = Arc::new(AtomicBool::new(false));
-    {
-        let interrupted = interrupted.clone();
-        tokio::spawn(async move {
-            loop {
-                if tokio::signal::ctrl_c().await.is_err() {
-                    break;
-                }
-                eprintln!("\nInterrupted (Ctrl+C). Attempting best-effort cleanup...");
-                interrupted.store(true, Ordering::Relaxed);
-                INTERRUPTED.store(true, Ordering::Relaxed);
-            }
-        });
-    }
+    install_interrupt_handler();
 
     let cli = Cli::parse();
 
