@@ -295,6 +295,17 @@ async fn check_latest_version(
     Ok(build_release_metadata(&tag, repo_base))
 }
 
+/// Returns the latest GitHub release tag normalized without a leading `v`.
+///
+/// Network and release-discovery failures are intentionally collapsed to
+/// `None` for diagnostics paths where update checks should never fail the run.
+pub async fn latest_version_tag() -> Option<String> {
+    let release = check_latest_version(GITHUB_RELEASES_LATEST_URL, PASSIVE_CHECK_TIMEOUT)
+        .await
+        .ok()?;
+    Some(normalize_version_tag(&release.tag).to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Download helpers
 // ---------------------------------------------------------------------------
