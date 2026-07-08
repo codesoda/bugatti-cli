@@ -177,7 +177,8 @@ async fn main() {
     );
     println!();
 
-    let is_update_command = matches!(&cli.command, Commands::Update { .. });
+    let skip_passive_update_check =
+        matches!(&cli.command, Commands::Update { .. } | Commands::Doctor);
 
     let code = match cli.command {
         Commands::Update { check, yes } => match bugatti::update::run_update(check, yes).await {
@@ -187,6 +188,20 @@ async fn main() {
                 EXIT_CONFIG_ERROR
             }
         },
+        Commands::Init { yes } => {
+            let project_root = std::env::current_dir().unwrap_or_else(|e| {
+                tracing::error!(error = %e, "failed to determine current directory");
+                std::process::exit(EXIT_CONFIG_ERROR);
+            });
+            bugatti::init::run_init(&project_root, yes)
+        }
+        Commands::Doctor => {
+            let project_root = std::env::current_dir().unwrap_or_else(|e| {
+                tracing::error!(error = %e, "failed to determine current directory");
+                std::process::exit(EXIT_CONFIG_ERROR);
+            });
+            bugatti::doctor::run_doctor(&project_root).await
+        }
         Commands::Test {
             path,
             skip_cmds,
@@ -270,7 +285,7 @@ async fn main() {
     };
 
     // Passive version check after successful runs
-    if code == EXIT_OK && !is_update_command {
+    if code == EXIT_OK && !skip_passive_update_check {
         bugatti::update::run_passive_check().await;
     }
 
@@ -1111,6 +1126,24 @@ mod tests {
                 assert!(yes);
             }
             _ => panic!("expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_init_subcommand_yes() {
+        let cli = Cli::parse_from(["bugatti", "init", "--yes"]);
+        match cli.command {
+            bugatti::cli::Commands::Init { yes } => assert!(yes),
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_doctor_subcommand() {
+        let cli = Cli::parse_from(["bugatti", "doctor"]);
+        match cli.command {
+            bugatti::cli::Commands::Doctor => {}
+            _ => panic!("expected Doctor command"),
         }
     }
 
