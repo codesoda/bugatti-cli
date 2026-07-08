@@ -309,3 +309,117 @@ instruction = "This will fail"
     assert!(content.contains("ERROR"));
     assert!(content.contains("something broke"));
 }
+
+#[test]
+fn per_test_command_overrides_apply_to_effective_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path();
+
+    std::fs::write(
+        project_root.join("bugatti.config.toml"),
+        r#"
+[commands.server]
+kind = "long_lived"
+cmd = "cargo run --bin server"
+readiness_url = "http://localhost:3000/ready"
+"#,
+    )
+    .unwrap();
+
+    let test_path = project_root.join("override.test.toml");
+    std::fs::write(
+        &test_path,
+        r#"
+[overrides.commands.server]
+cmd = "cargo run --bin alternate-server"
+readiness_timeout_secs = 3
+
+[[steps]]
+instruction = "Check the server"
+"#,
+    )
+    .unwrap();
+
+    let global_config = config::load_config(project_root).unwrap();
+    let test_file = test_file::parse_test_file(&test_path).unwrap();
+    let effective = config::effective_config(&global_config, &test_file);
+    let server = effective.commands.get("server").unwrap();
+
+    assert_eq!(server.kind, config::CommandKind::LongLived);
+    assert_eq!(server.cmd, "cargo run --bin alternate-server");
+    assert_eq!(server.readiness_timeout_secs, Some(3));
+    assert_eq!(
+        server.readiness_url.as_deref(),
+        Some("http://localhost:3000/ready")
+    );
+}
+
+#[test]
+fn layered_config_and_per_test_overrides_stack() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path();
+    let home = tempfile::tempdir().unwrap();
+    let global_dir = home.path().join(".bugatti");
+    std::fs::create_dir_all(&global_dir).unwrap();
+    let global_path = global_dir.join("config.toml");
+
+    std::fs::write(
+        &global_path,
+        r#"
+[provider]
+base_url = "http://global.example"
+
+[commands.server]
+kind = "long_lived"
+cmd = "cargo run --bin global-server"
+readiness_url = "http://localhost:3000/ready"
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        project_root.join("bugatti.config.toml"),
+        r#"
+[provider]
+agent_args = ["--project"]
+
+[commands.server]
+kind = "long_lived"
+cmd = "cargo run --bin project-server"
+readiness_url = "http://localhost:4000/ready"
+"#,
+    )
+    .unwrap();
+
+    let test_path = project_root.join("layered.test.toml");
+    std::fs::write(
+        &test_path,
+        r#"
+[overrides.commands.server]
+cmd = "cargo run --bin test-server"
+
+[[steps]]
+instruction = "Check layered config"
+"#,
+    )
+    .unwrap();
+
+    let layered =
+        config::load_layered_config_with_options(project_root, None, Some(&global_path), |_| None)
+            .unwrap();
+    let test_file = test_file::parse_test_file(&test_path).unwrap();
+    let effective = config::effective_config(&layered, &test_file);
+    let server = effective.commands.get("server").unwrap();
+
+    assert_eq!(
+        effective.provider.base_url.as_deref(),
+        Some("http://global.example")
+    );
+    assert_eq!(effective.provider.agent_args, vec!["--project"]);
+    assert_eq!(server.kind, config::CommandKind::LongLived);
+    assert_eq!(server.cmd, "cargo run --bin test-server");
+    assert_eq!(
+        server.readiness_url.as_deref(),
+        Some("http://localhost:4000/ready")
+    );
+}

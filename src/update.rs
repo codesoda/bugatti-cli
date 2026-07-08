@@ -300,6 +300,17 @@ async fn check_latest_version(
     Ok(build_release_metadata(&tag, repo_base))
 }
 
+/// Returns the latest GitHub release tag normalized without a leading `v`.
+///
+/// Network and release-discovery failures are intentionally collapsed to
+/// `None` for diagnostics paths where update checks should never fail the run.
+pub async fn latest_version_tag() -> Option<String> {
+    let release = check_latest_version(GITHUB_RELEASES_LATEST_URL, PASSIVE_CHECK_TIMEOUT)
+        .await
+        .ok()?;
+    Some(normalize_version_tag(&release.tag).to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Download helpers
 // ---------------------------------------------------------------------------
@@ -744,10 +755,14 @@ async fn passive_version_check() {
         return;
     }
 
-    // Always update timestamp after attempt (prevents retry storms)
+    // Record the attempt *before* the network call (prevents retry storms).
+    // The outer deadline in `run_passive_check` may cancel this future while
+    // the HTTP request is in flight; writing the timestamp first guarantees
+    // a hung network can't cause every subsequent run to retry (and pay the
+    // full deadline) again.
+    write_last_check_timestamp();
     let check_result =
         check_latest_version(GITHUB_RELEASES_LATEST_URL, PASSIVE_CHECK_TIMEOUT).await;
-    write_last_check_timestamp();
 
     let release = match check_result {
         Ok(r) => r,
@@ -762,9 +777,18 @@ async fn passive_version_check() {
     }
 }
 
-/// Runs the passive version check, bounded by the passive HTTP timeout (3s).
+/// Awaits `fut` but abandons it after `deadline` elapses.
+async fn run_with_deadline<F: std::future::Future<Output = ()>>(fut: F, deadline: Duration) {
+    if tokio::time::timeout(deadline, fut).await.is_err() {
+        tracing::debug!("passive update check timed out; abandoning");
+    }
+}
+
+/// Runs the passive version check with a hard 3-second deadline.
+/// If the check doesn't finish in time it is dropped (cancelled); the
+/// process may then exit without completing it.
 pub async fn run_passive_check() {
-    passive_version_check().await;
+    run_with_deadline(passive_version_check(), PASSIVE_CHECK_TIMEOUT).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +798,28 @@ pub async fn run_passive_check() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_abandons_hung_future() {
+        // A future that never completes must not block past the deadline.
+        let start = tokio::time::Instant::now();
+        run_with_deadline(std::future::pending::<()>(), Duration::from_secs(3)).await;
+        // Paused clock auto-advances exactly to the deadline: reaching here
+        // proves the timeout fired, and the elapsed check pins its value.
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_completes_fast_future() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f2 = flag.clone();
+        run_with_deadline(
+            async move { f2.store(true, std::sync::atomic::Ordering::SeqCst) },
+            Duration::from_secs(3),
+        )
+        .await;
+        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[test]
     fn normalize_strips_lowercase_v() {
@@ -841,6 +887,25 @@ mod tests {
     #[test]
     fn parse_checksums_malformed() {
         assert!(parse_checksums("notahash filename").is_err());
+    }
+
+    // Deliberately not cfg-gated: on a target outside the release matrix this
+    // test FAILS, which is the signal to either add the target to release.yml
+    // or extend the known list. A cfg gate would make the test tautological
+    // (only compiled where it passes by construction).
+    #[test]
+    fn build_target_is_known_release_target() {
+        let known = [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+        ];
+        assert!(
+            known.contains(&build_target()),
+            "TARGET '{}' is not in the release matrix — update release.yml",
+            build_target()
+        );
     }
 
     #[test]

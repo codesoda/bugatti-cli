@@ -8,8 +8,19 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::time::Duration;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
+
+#[cfg(not(test))]
+const CLOSE_EOF_GRACE: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const CLOSE_EOF_GRACE: Duration = Duration::from_millis(200);
+
+#[cfg(not(test))]
+const CLOSE_KILL_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const CLOSE_KILL_GRACE: Duration = Duration::from_millis(200);
 
 /// Claude Code CLI provider adapter.
 ///
@@ -145,9 +156,16 @@ impl ClaudeCodeAdapter {
             cmd.arg("--append-system-prompt-file").arg(&prompt_path);
         }
 
-        cmd.stdin(Stdio::piped())
+        cmd.kill_on_drop(true)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        // Put claude in its own process group so graceful_kill's group signals
+        // reach descendants it spawns (MCP servers, browsers, tools) — not just
+        // the direct child.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         if self.verbose {
             let c = output::stderr_colors();
@@ -319,12 +337,17 @@ impl AgentSession for ClaudeCodeAdapter {
         self.reader.take();
 
         if let Some(mut child) = self.child.take() {
-            match child.wait().await {
-                Ok(status) => {
+            match tokio::time::timeout(CLOSE_EOF_GRACE, child.wait()).await {
+                Ok(Ok(status)) => {
                     tracing::info!(exit_status = %status, "claude process exited");
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(error = %e, "failed to wait for claude process");
+                }
+                Err(_) => {
+                    tracing::warn!("claude process ignored EOF; escalating to SIGTERM/SIGKILL");
+                    let outcome = crate::command::graceful_kill(&mut child, CLOSE_KILL_GRACE).await;
+                    tracing::warn!(?outcome, "claude process shutdown escalated");
                 }
             }
         }
@@ -338,15 +361,18 @@ impl AgentSession for ClaudeCodeAdapter {
 /// Reads JSONL from stdout, parsing each line into `OutputChunk` values.
 /// Yields `OutputChunk::Done` when a `result` event is received (turn complete).
 /// The process stays alive for the next message.
-struct StreamTurnStream<'a> {
-    reader: &'a mut BufReader<tokio::process::ChildStdout>,
+struct StreamTurnStream<'a, R> {
+    reader: &'a mut R,
     done: bool,
     verbose: bool,
     colors: Option<&'static output::Colors>,
 }
 
 #[async_trait]
-impl<'a> OutputStream for StreamTurnStream<'a> {
+impl<'a, R> OutputStream for StreamTurnStream<'a, R>
+where
+    R: AsyncBufRead + Unpin + Send,
+{
     async fn next_chunk(&mut self) -> Option<Result<OutputChunk, ProviderError>> {
         if self.done {
             return None;
@@ -531,6 +557,60 @@ mod tests {
     use super::*;
     use crate::config::{Config, ProviderConfig};
     use indexmap::IndexMap;
+    #[cfg(unix)]
+    use std::time::Instant;
+
+    #[cfg(unix)]
+    fn write_executable_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    async fn wait_until_process_gone(pid: u32, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            // SAFETY: signal 0 checks process existence without delivering a signal.
+            let exists = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+            if !exists {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // SAFETY: signal 0 checks process existence without delivering a signal.
+        unsafe { libc::kill(pid as libc::pid_t, 0) != 0 }
+    }
+
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    struct FailingReader;
+
+    impl AsyncRead for FailingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+        }
+    }
+
+    impl AsyncBufRead for FailingReader {
+        fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+            Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+        }
+
+        fn consume(self: Pin<&mut Self>, _amt: usize) {}
+    }
 
     fn test_config() -> Config {
         Config {
@@ -582,6 +662,75 @@ mod tests {
         assert!(adapter.child.is_none());
         assert!(adapter.stdin.is_none());
         assert!(adapter.reader.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_sigterms_process_that_ignores_eof() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script =
+            write_executable_script(tmp.path(), "fake-claude", "#!/bin/sh\nexec sleep 300\n");
+        let mut adapter = ClaudeCodeAdapter {
+            binary_path: script,
+            agent_args: vec![],
+            artifact_dir: tmp.path().to_path_buf(),
+            child: None,
+            stdin: None,
+            reader: None,
+            verbose: false,
+            bootstrap_content: None,
+        };
+
+        adapter.ensure_started().unwrap();
+        let pid = adapter.child.as_ref().unwrap().id().unwrap();
+        let start = Instant::now();
+
+        adapter.close().await.unwrap();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "close should escalate promptly when EOF is ignored"
+        );
+        assert!(
+            wait_until_process_gone(pid, Duration::from_secs(3)).await,
+            "claude pid {pid} should be gone after close"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_kills_process_that_ignores_eof_and_sigterm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = write_executable_script(
+            tmp.path(),
+            "fake-claude",
+            "#!/bin/sh\nexec perl -e '$SIG{TERM}=\"IGNORE\"; sleep 300'\n",
+        );
+        let mut adapter = ClaudeCodeAdapter {
+            binary_path: script,
+            agent_args: vec![],
+            artifact_dir: tmp.path().to_path_buf(),
+            child: None,
+            stdin: None,
+            reader: None,
+            verbose: false,
+            bootstrap_content: None,
+        };
+
+        adapter.ensure_started().unwrap();
+        let pid = adapter.child.as_ref().unwrap().id().unwrap();
+        let start = Instant::now();
+
+        adapter.close().await.unwrap();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "close should force-kill promptly when EOF and SIGTERM are ignored"
+        );
+        assert!(
+            wait_until_process_gone(pid, Duration::from_secs(3)).await,
+            "claude pid {pid} should be gone after close"
+        );
     }
 
     #[test]
@@ -663,6 +812,46 @@ mod tests {
 
         assert_eq!(collected, vec!["Hello"]);
         let _ = child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn stream_turn_stream_eof_reports_session_crashed_then_done() {
+        let mut reader = BufReader::new(std::io::Cursor::new(Vec::<u8>::new()));
+        let mut stream = StreamTurnStream {
+            reader: &mut reader,
+            done: false,
+            verbose: false,
+            colors: None,
+        };
+
+        match stream.next_chunk().await {
+            Some(Err(ProviderError::SessionCrashed(msg))) => {
+                assert!(msg.contains("claude process exited unexpectedly"));
+            }
+            other => panic!("expected SessionCrashed on EOF, got: {other:?}"),
+        }
+        assert!(stream.next_chunk().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_turn_stream_broken_pipe_reports_stream_error_then_done() {
+        let mut reader = FailingReader;
+        let mut stream = StreamTurnStream {
+            reader: &mut reader,
+            done: false,
+            verbose: false,
+            colors: None,
+        };
+
+        match stream.next_chunk().await {
+            Some(Err(ProviderError::StreamError(msg))) => {
+                // Assert on our own message prefix only; the io::Error Display
+                // text for BrokenPipe is platform-dependent.
+                assert!(msg.contains("failed to read from claude CLI stdout"));
+            }
+            other => panic!("expected StreamError on broken pipe, got: {other:?}"),
+        }
+        assert!(stream.next_chunk().await.is_none());
     }
 
     #[tokio::test]
