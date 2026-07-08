@@ -26,7 +26,7 @@ Manual QA doesn't scale. Traditional E2E test frameworks are brittle and expensi
 
 ## Install
 
-### Pre-built binary (macOS arm64)
+### Pre-built binary (macOS arm64/x86_64, Linux x86_64/arm64)
 
 ```sh
 curl -sSf https://raw.githubusercontent.com/codesoda/bugatti-cli/main/install.sh | sh

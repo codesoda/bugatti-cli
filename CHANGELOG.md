@@ -7,9 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-08
+
+### Added
+
+- `bugatti init` scaffolds a commented `bugatti.config.toml` and an example test file, skipping files that already exist. `bugatti doctor` runs preflight diagnostics: config parsing, provider binary/version checks, command availability, readiness URL validation, test discovery/parse/include-cycle checks, build target, and update status (#19, #20)
+- Layered configuration: a global `~/.bugatti/config.toml` (override the directory with `BUGATTI_CONFIG_HOME`) merges beneath the project config, and `BUGATTI_PROVIDER`, `BUGATTI_BASE_URL`, and `BUGATTI_STEP_TIMEOUT` environment variables override both. Field presence is tracked per layer, so explicitly setting a default value in the project config still wins over the global layer (#14)
+- Per-test command overrides: `.test.toml` files can override configured commands by name via `[overrides.commands.<name>]`, merging only the fields that are set (`kind` is not overridable); overrides for unknown command names are ignored with a warning (#41)
+- Cross-platform release builds: macOS arm64 and x86_64, Linux x86_64 and arm64 (glibc 2.35 baseline via Ubuntu 22.04 builders). `install.sh` detects the platform, downloads the matching artifact, and verifies it against the release's SHA-256 checksums (#18)
+
 ### Changed
 
-- Provider sessions, command execution, and the update checker now use Tokio async I/O. Step and teardown timeouts are enforced while waiting for each streamed chunk, and `pi`/`codex` subprocesses are killed on drop so abandoned turns don't linger.
+- Provider sessions, command execution, and the update checker now use Tokio async I/O. Step and teardown timeouts are enforced while waiting for each streamed chunk, and `pi`/`codex` subprocesses are killed on drop so abandoned turns don't linger. The remaining runtime paths are now async too: readiness checks use a built-in HTTP client instead of shelling out to `curl`, Ctrl+C handling uses Tokio signals with eager registration, and blocking update-install work runs off the async runtime with join failures surfaced (#17)
+- `codex` and `pi` provider verbose output now uses the shared color palette, respecting `NO_COLOR` and disabling ANSI codes when stderr is piped (#49)
+
+### Fixed
+
+- The passive update check no longer delays process exit: it runs under a hard 3-second deadline and records the attempt before the network call, so a hung network can't cause repeated slow exits (#36)
+- Provider and command subprocesses are torn down reliably: graceful EOF grace → SIGTERM → SIGKILL escalation with process-group cleanup that also sweeps SIGTERM-ignoring descendants, RAII cleanup when teardown is skipped (e.g. on panic), and a bounded post-SIGKILL reap so an unkillable process can't hang shutdown (#23, #24)
+- Provider stream I/O failures return a stream error and preserve the partial transcript instead of panicking; end-of-stream and broken-pipe behavior is now covered by regression tests (#21, #22)
 
 ## [0.6.0] - 2026-07-07
 
@@ -119,7 +135,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs deploy workflow triggers and Node version
 - Result marker parser handling of embedded markers
 
-[Unreleased]: https://github.com/codesoda/bugatti-cli/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/codesoda/bugatti-cli/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/codesoda/bugatti-cli/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/codesoda/bugatti-cli/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/codesoda/bugatti-cli/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/codesoda/bugatti-cli/compare/v0.5.0...v0.5.1
